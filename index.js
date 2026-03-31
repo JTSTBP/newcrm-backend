@@ -40,9 +40,7 @@ app.use('/api/poc-bucket', pocBucketRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/attendance', attendanceRoutes);
 
-app.get('/', (req, res) => {
-    res.send('New CRM Backend Server is running');
-});
+
 app.use(express.static(path.join(__dirname, "dist")));
 
 app.use((req, res) => {
