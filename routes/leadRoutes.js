@@ -583,10 +583,9 @@ router.put('/:id', auth, async (req, res) => {
                 if (poc._id) return poc; // existing
 
                 // New POC logic:
-                // 1. If it's an 'incomplete' lead being updated, it's 'pending'
-                // 2. If it's an 'approved' lead and user is Admin, it's 'approved'
-                // 3. If it's an 'approved' lead and user is NOT Admin, it's 'pending' (granular approval)
-                const initialStatus = 'pending';
+                // If the lead itself is incomplete (approve leads tab), new POCs are 'pending'.
+                // If it's an approved lead (main tab), new POCs are automatically 'approved'.
+                const initialStatus = oldLead.status === 'incomplete' ? 'pending' : 'approved';
 
                 return {
                     ...poc,
@@ -773,6 +772,8 @@ router.post('/:id/poc', auth, async (req, res) => {
             return res.status(400).json({ message: 'A contact with this phone or email already exists in this lead.' });
         }
 
+        const initialStatus = lead.status === 'incomplete' ? 'pending' : 'approved';
+
         const newPOC = {
             name,
             designation,
@@ -780,7 +781,7 @@ router.post('/:id/poc', auth, async (req, res) => {
             email,
             linkedin_url,
             stage: stage || 'New',
-            approvalStatus: 'pending'
+            approvalStatus: initialStatus
         };
         lead.points_of_contact.push(newPOC);
         await lead.save();
