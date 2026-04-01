@@ -63,6 +63,10 @@ router.get('/', auth, async (req, res) => {
 
         let query = {};
 
+        if (req.query.user_id) {
+            query.user_id = req.query.user_id;
+        }
+
         if (req.query.from || req.query.to) {
             query.date = {};
             if (req.query.from) {

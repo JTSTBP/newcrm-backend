@@ -196,9 +196,13 @@ router.post('/', auth, async (req, res) => {
             leadStatus = 'incomplete';
         }
 
+        // POCs are auto-approved if the lead being created is approved (e.g. Admin or BD from main tab)
+        // POCs are pending if the lead is incomplete (e.g. BD using the pending leads flow)
+        const resolvedLeadStatus = leadStatus || 'approved';
+        const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
         const processedPocs = (points_of_contact || []).map(poc => ({
             ...poc,
-            approvalStatus: 'pending'
+            approvalStatus: initialPocStatus
         }));
 
         const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
