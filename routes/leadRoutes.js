@@ -1029,6 +1029,20 @@ router.post('/bulk-upload', auth, async (req, res) => {
             return res.status(400).json({ message: 'Please provide an array of leads.' });
         }
 
+        // Map assigned_by_email to user IDs
+        const User = require('../models/User'); // Assuming User model is needed, check top imports later
+        const validEmails = new Set(
+            leads.map(l => l.assigned_by_email?.toLowerCase().trim()).filter(Boolean)
+        );
+
+        let emailToUserIdMap = {};
+        if (validEmails.size > 0) {
+            const users = await User.find({ email: { $in: Array.from(validEmails) } }, '_id email');
+            users.forEach(user => {
+                emailToUserIdMap[user.email.toLowerCase()] = user._id;
+            });
+        }
+
         const stats = {
             created: 0,
             updated: 0,
@@ -1047,6 +1061,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     industry_name,
                     linkedin_link,
                     stage,
+                    assigned_by_email,
                     assignedBy,
                     points_of_contact
                 } = row;
@@ -1054,6 +1069,19 @@ router.post('/bulk-upload', auth, async (req, res) => {
                 // Basic validation
                 if (!company_name || !website_url) {
                     throw new Error(`Row ${i + 1}: Company name and website URL are mandatory.`);
+                }
+
+                // Determine final assigned_by user ID
+                let finalAssignedBy = req.user.id;
+                if (assigned_by_email) {
+                    const normalizedEmail = assigned_by_email.toLowerCase().trim();
+                    if (emailToUserIdMap[normalizedEmail]) {
+                        finalAssignedBy = emailToUserIdMap[normalizedEmail];
+                    } else {
+                        throw new Error(`Row ${i + 1}: User with email "${assigned_by_email}" not found.`);
+                    }
+                } else if (assignedBy) {
+                    finalAssignedBy = assignedBy;
                 }
 
                 // POC uniqueness check within the lead
@@ -1069,9 +1097,9 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     industry_name,
                     linkedin_link,
                     stage: stage || 'New',
-                    assignedBy: assignedBy || req.user.id, // Default to current user if not provided
+                    assignedBy: finalAssignedBy,
                     createdBy: req.user.id,
-                    points_of_contact: (points_of_contact || []).map(p => ({ ...p, approvalStatus: 'pending' }))
+                    points_of_contact: (points_of_contact || []).map(p => ({ ...p, approvalStatus: 'approved' }))
                 };
 
                 // Use findOneAndUpdate with upsert
@@ -1086,7 +1114,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     if (industry_name) existingLead.industry_name = industry_name;
                     if (linkedin_link) existingLead.linkedin_link = linkedin_link;
                     if (stage) existingLead.stage = stage;
-                    if (assignedBy) existingLead.assignedBy = assignedBy;
+                    if (assigned_by_email || assignedBy) existingLead.assignedBy = finalAssignedBy;
 
                     // Merge POCs
                     if (points_of_contact && points_of_contact.length > 0) {
@@ -1097,7 +1125,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
                                 (newPoc.email && ep.email === newPoc.email)
                             );
                             if (!isDuplicate) {
-                                existingPocs.push({ ...newPoc, approvalStatus: 'pending' });
+                                existingPocs.push({ ...newPoc, approvalStatus: 'approved' });
                             } else {
                                 // Optionally update existing POC details if needed
                                 const index = existingPocs.findIndex(ep =>
