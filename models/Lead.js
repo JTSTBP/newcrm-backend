@@ -32,8 +32,7 @@ const PointOfContactSchema = new mongoose.Schema({
     latest_remark_id: { type: mongoose.Schema.Types.ObjectId },
     approvalStatus: {
         type: String,
-        enum: ["pending", "approved"],
-
+        enum: ["pending", "approved", "rejected"],
     },
 });
 
@@ -46,7 +45,7 @@ const LeadSchema = new mongoose.Schema(
         website_url: { type: String, unique: true, required: true },
         status: {
             type: String,
-            enum: ["incomplete", "approved"],
+            enum: ["incomplete", "approved", "rejected"],
             default: "approved",
         },
         hiring_needs: [{ type: String }],

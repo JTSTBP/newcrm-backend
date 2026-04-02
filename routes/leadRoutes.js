@@ -37,11 +37,11 @@ const buildLeadQuery = (params) => {
     }
 
     if (status === 'approved') {
-        query.status = { $ne: 'incomplete' };
+        query.status = { $nin: ['incomplete', 'rejected'] };
     } else if (status === 'incomplete') {
         query.$or = [
-            { status: 'incomplete' },
-            { 'points_of_contact.approvalStatus': 'pending' }
+            { status: { $in: ['incomplete', 'rejected'] } },
+            { 'points_of_contact.approvalStatus': { $in: ['pending', 'rejected'] } }
         ];
     } else if (status) {
         query.status = status;
@@ -66,9 +66,9 @@ router.get('/', auth, async (req, res) => {
 
         const query = buildLeadQuery(req.query);
 
-        // Default to approved leads (anything not marked incomplete) if no status filter is provided
+        // Default to approved leads (anything not marked incomplete or rejected) if no status filter is provided
         if (!req.query.status) {
-            query.status = { $ne: 'incomplete' };
+            query.status = { $nin: ['incomplete', 'rejected'] };
         }
 
         // Enforce user isolation for non-admins
@@ -96,9 +96,9 @@ router.get('/', auth, async (req, res) => {
 
         const results = leads.map(lead => {
             const leadObj = lead.toObject();
-            // If viewing approved leads (or default), hide pending POCs
+            // If viewing approved leads (or default), hide pending/rejected POCs
             if (!req.query.status || req.query.status === 'approved') {
-                leadObj.points_of_contact = (leadObj.points_of_contact || []).filter(poc => poc.approvalStatus !== 'pending');
+                leadObj.points_of_contact = (leadObj.points_of_contact || []).filter(poc => !['pending', 'rejected'].includes(poc.approvalStatus));
             }
             return leadObj;
         });
@@ -126,7 +126,8 @@ router.get('/check', auth, async (req, res) => {
         }
 
         // Search for lead with this URL
-        const lead = await Lead.findOne({ website_url: url });
+        const normalizedUrl = url.trim().toLowerCase();
+        const lead = await Lead.findOne({ website_url: normalizedUrl });
         if (!lead) {
             return res.status(404).json({ message: 'No lead found with this website URL.' });
         }
@@ -216,8 +217,10 @@ router.post('/', auth, async (req, res) => {
             return res.status(400).json({ message: 'Company name is required for approved leads.' });
         }
 
+        const normalizedUrl = website_url.trim().toLowerCase();
+
         // Check if website already exists
-        const existingLead = await Lead.findOne({ website_url });
+        const existingLead = await Lead.findOne({ website_url: normalizedUrl });
         if (existingLead) {
             return res.status(400).json({ message: 'A lead with this website already exists.' });
         }
@@ -225,7 +228,7 @@ router.post('/', auth, async (req, res) => {
         const newLead = new Lead({
             company_name,
             company_email,
-            website_url,
+            website_url: normalizedUrl,
             company_size,
             industry_name,
             linkedin_link,
@@ -250,7 +253,7 @@ router.post('/', auth, async (req, res) => {
             description: `Lead "${company_name}" was created.`,
             userId: req.user.id,
             userName: req.user.name || 'Admin',
-            metadata: { company_name, website_url, stage: stage || 'New' }
+            metadata: { company_name, website_url: normalizedUrl, stage: stage || 'New' }
         });
 
         res.status(201).json(populatedLead);
@@ -327,7 +330,8 @@ router.get('/pocs', auth, async (req, res) => {
                             createdAt: "$createdAt",
                             assignedBy: "$assignedUser.name",
                             latest_remark_id: "$points_of_contact.latest_remark_id",
-                            remarks: 1
+                            remarks: 1,
+                            stage: "$points_of_contact.stage"
                         }
                     }
                 ]
@@ -377,7 +381,8 @@ router.get('/pocs', auth, async (req, res) => {
                     content: r.content,
                     created_at: r.created_at,
                     by: r.profile?.name || 'Unknown'
-                })).reverse() // Latest first
+                })).reverse(), // Latest first
+                stage: poc.stage || 'New'
             };
         });
 
@@ -558,8 +563,13 @@ router.put('/:id', auth, async (req, res) => {
         const oldPocCount = oldLead?.points_of_contact?.length || 0;
 
         // Website uniqueness check (if changed)
-        if (website_url && website_url !== oldLead.website_url) {
-            const existingLead = await Lead.findOne({ website_url });
+        let normalizedUrl = website_url;
+        if (website_url) {
+            normalizedUrl = website_url.trim().toLowerCase();
+        }
+
+        if (normalizedUrl && normalizedUrl !== oldLead.website_url) {
+            const existingLead = await Lead.findOne({ website_url: normalizedUrl });
             if (existingLead) {
                 return res.status(400).json({ message: 'A lead with this website already exists.' });
             }
@@ -569,7 +579,7 @@ router.put('/:id', auth, async (req, res) => {
         const updateData = {};
         if (company_name !== undefined) updateData.company_name = company_name;
         if (company_email !== undefined) updateData.company_email = company_email;
-        if (website_url && req.user.role !== 'BD Executive') updateData.website_url = website_url;
+        if (normalizedUrl && req.user.role !== 'BD Executive') updateData.website_url = normalizedUrl;
         if (company_size !== undefined) updateData.company_size = company_size;
         if (industry_name !== undefined) updateData.industry_name = industry_name;
         if (linkedin_link !== undefined) updateData.linkedin_link = linkedin_link;
@@ -589,7 +599,7 @@ router.put('/:id', auth, async (req, res) => {
                 // New POC logic:
                 // If the lead itself is incomplete (approve leads tab), new POCs are 'pending'.
                 // If it's an approved lead (main tab), new POCs are automatically 'approved'.
-                const initialStatus = oldLead.status === 'incomplete' ? 'pending' : 'approved';
+                const initialStatus = poc.approvalStatus || (oldLead.status === 'incomplete' ? 'pending' : 'approved');
 
                 return {
                     ...poc,
@@ -751,8 +761,8 @@ router.delete('/:id', auth, async (req, res) => {
 router.post('/:id/poc', auth, async (req, res) => {
     try {
         const { name, designation, phone, email, linkedin_url, stage } = req.body;
-        if (!name || !phone || !email) {
-            return res.status(400).json({ message: 'Name, Phone, and Email are mandatory fields.' });
+        if (!name && !phone && !email && !linkedin_url) {
+            return res.status(400).json({ message: 'At least one identifying field (Name, Phone, Email, or LinkedIn) is required.' });
         }
 
         const lead = await Lead.findById(req.params.id);
@@ -767,16 +777,16 @@ router.post('/:id/poc', auth, async (req, res) => {
             return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
 
-        // Check for duplicates
+        // Check for duplicates (only for fields that are provided)
         const isDuplicate = lead.points_of_contact.some(p =>
-            p.phone === phone || (p.email && p.email.toLowerCase() === email.toLowerCase())
+            (phone && p.phone === phone) || (email && p.email && email && p.email.toLowerCase() === email.toLowerCase())
         );
 
         if (isDuplicate) {
             return res.status(400).json({ message: 'A contact with this phone or email already exists in this lead.' });
         }
 
-        const initialStatus = lead.status === 'incomplete' ? 'pending' : 'approved';
+        const initialStatus = req.body.approvalStatus || (lead.status === 'incomplete' ? 'pending' : 'approved');
 
         const newPOC = {
             name,
@@ -906,6 +916,35 @@ router.patch('/bulk/update', auth, async (req, res) => {
     }
 });
 
+// @route   POST /api/leads/bulk/delete
+// @desc    Bulk delete leads
+// @access  Private (Admin)
+router.post('/bulk/delete', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        }
+
+        const { ids, isAllGlobal, filters } = req.body;
+
+        let query = {};
+        if (isAllGlobal) {
+            query = buildLeadQuery(filters || {});
+        } else if (ids && Array.isArray(ids)) {
+            query = { _id: { $in: ids } };
+        } else {
+            return res.status(400).json({ message: 'Please provide IDs or a global selection flag.' });
+        }
+
+        const result = await Lead.deleteMany(query);
+
+        res.json({ message: `Successfully deleted ${result.deletedCount} leads.` });
+    } catch (err) {
+        console.error('Bulk delete error:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 // @route   PATCH /api/leads/:id/approve
 // @desc    Approve an incomplete lead
 // @access  Private (Admin)
@@ -969,6 +1008,28 @@ router.patch('/:id/approve', auth, async (req, res) => {
     }
 });
 
+// @route   PATCH /api/leads/:id/reject
+// @desc    Reject an incomplete lead
+// @access  Private (Admin)
+router.patch('/:id/reject', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        }
+
+        const lead = await Lead.findById(req.params.id);
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        lead.status = 'rejected';
+        await lead.save();
+
+        res.json({ message: 'Lead rejected successfully', lead });
+    } catch (err) {
+        console.error('Reject lead error:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 // @route   PATCH /api/leads/:id/approve-poc/:pocId
 // @desc    Approve a specific POC within a lead
 // @access  Private (Admin)
@@ -1012,9 +1073,34 @@ router.patch('/:id/approve-poc/:pocId', auth, async (req, res) => {
             userName: req.user.name || 'Admin'
         });
 
-        res.json({ message: 'POC approved successfully', lead });
+        res.json({ message: 'Point of Contact approved successfully', lead });
     } catch (err) {
         console.error('Approve POC error:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// @route   PATCH /api/leads/:id/reject-poc/:pocId
+// @desc    Reject a pending POC
+// @access  Private (Admin)
+router.patch('/:id/reject-poc/:pocId', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        }
+
+        const lead = await Lead.findById(req.params.id);
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        const poc = lead.points_of_contact.id(req.params.pocId);
+        if (!poc) return res.status(404).json({ message: 'POC not found' });
+
+        poc.approvalStatus = 'rejected';
+        await lead.save();
+
+        res.json({ message: 'Point of Contact rejected successfully', lead });
+    } catch (err) {
+        console.error('Reject POC error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 });
@@ -1093,10 +1179,11 @@ router.post('/bulk-upload', auth, async (req, res) => {
                 if (pocError) throw new Error(`Row ${i + 1}: ${pocError}`);
 
                 // Prepare lead data
+                const normalizedUrl = website_url.trim().toLowerCase();
                 const leadData = {
                     company_name,
                     company_email,
-                    website_url,
+                    website_url: normalizedUrl,
                     company_size,
                     industry_name,
                     linkedin_link,
@@ -1108,7 +1195,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
 
                 // Use findOneAndUpdate with upsert
                 // We search by website_url as it's the unique identifier mentioned
-                const existingLead = await Lead.findOne({ website_url });
+                const existingLead = await Lead.findOne({ website_url: normalizedUrl });
 
                 if (existingLead) {
                     // Update existing lead fields
@@ -1198,11 +1285,8 @@ router.post('/:leadId/poc/:pocId/call', auth, async (req, res) => {
         // 1. Update POC stage
         poc.stage = stage;
 
-        // 2. Auto-advance lead stage to 'Contacted' if it's still 'New'
-        const stageOrder = ['New', 'Contacted', 'Proposal Sent', 'Negotiation', 'Won', 'Lost', 'Onboarded', 'No vendor', 'Future Reference'];
-        const currentStageIndex = stageOrder.indexOf(lead.stage);
-        const contactedIndex = stageOrder.indexOf('Contacted');
-        if (currentStageIndex < contactedIndex) {
+        // 2. Auto-advance lead stage to 'Contacted' if it's currently 'New'
+        if (lead.stage === 'New') {
             lead.stage = 'Contacted';
         }
 
