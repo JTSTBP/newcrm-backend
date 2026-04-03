@@ -155,9 +155,9 @@ const validatePOCs = (pocs) => {
     const phones = new Set();
     const emails = new Set();
     for (const poc of pocs) {
-        if (phones.has(poc.phone)) return `Duplicate phone number found: ${poc.phone}`;
+        if (poc.phone && phones.has(poc.phone)) return `Duplicate phone number found: ${poc.phone}`;
         if (poc.email && emails.has(poc.email)) return `Duplicate email found: ${poc.email}`;
-        phones.add(poc.phone);
+        if (poc.phone) phones.add(poc.phone);
         if (poc.email) emails.add(poc.email);
     }
     return null;
