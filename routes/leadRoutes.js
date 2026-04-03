@@ -14,11 +14,14 @@ const buildLeadQuery = (params) => {
     let query = {};
 
     if (search) {
-        query.$or = [
-            { company_name: { $regex: search, $options: 'i' } },
-            { website_url: { $regex: search, $options: 'i' } },
-            { company_email: { $regex: search, $options: 'i' } }
-        ];
+        query.$and = query.$and || [];
+        query.$and.push({
+            $or: [
+                { company_name: { $regex: search, $options: 'i' } },
+                { website_url: { $regex: search, $options: 'i' } },
+                { company_email: { $regex: search, $options: 'i' } }
+            ]
+        });
     }
 
     if (leadStage) query.stage = leadStage;
@@ -39,10 +42,13 @@ const buildLeadQuery = (params) => {
     if (status === 'approved') {
         query.status = { $nin: ['incomplete', 'rejected'] };
     } else if (status === 'incomplete') {
-        query.$or = [
-            { status: { $in: ['incomplete', 'rejected'] } },
-            { 'points_of_contact.approvalStatus': { $in: ['pending', 'rejected'] } }
-        ];
+        query.$and = query.$and || [];
+        query.$and.push({
+            $or: [
+                { status: { $in: ['incomplete', 'rejected'] } },
+                { 'points_of_contact.approvalStatus': { $in: ['pending', 'rejected'] } }
+            ]
+        });
     } else if (status) {
         query.status = status;
     }
@@ -155,10 +161,24 @@ const validatePOCs = (pocs) => {
     const phones = new Set();
     const emails = new Set();
     for (const poc of pocs) {
-        if (poc.phone && phones.has(poc.phone)) return `Duplicate phone number found: ${poc.phone}`;
-        if (poc.email && emails.has(poc.email)) return `Duplicate email found: ${poc.email}`;
-        if (poc.phone) phones.add(poc.phone);
-        if (poc.email) emails.add(poc.email);
+        // Primary phone uniqueness
+        if (poc.phone && poc.phone.trim()) {
+            const p = poc.phone.trim();
+            if (phones.has(p)) return `Duplicate phone number found: ${p}`;
+            phones.add(p);
+        }
+        // Alternate phone uniqueness
+        if (poc.alternate_phone && poc.alternate_phone.trim()) {
+            const ap = poc.alternate_phone.trim();
+            if (phones.has(ap)) return `Duplicate phone number found: ${ap} (used as alternate number)`;
+            phones.add(ap);
+        }
+        // Email uniqueness
+        if (poc.email && poc.email.trim()) {
+            const e = poc.email.trim();
+            if (emails.has(e)) return `Duplicate email found: ${e}`;
+            emails.add(e);
+        }
     }
     return null;
 };
