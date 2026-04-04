@@ -40,7 +40,7 @@ app.use('/api/poc-bucket', pocBucketRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/attendance', attendanceRoutes);
 
-
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(express.static(path.join(__dirname, "dist")));
 
 app.use((req, res) => {

@@ -122,20 +122,28 @@ router.get('/', auth, async (req, res) => {
 });
 
 // @route   GET /api/leads/check
-// @desc    Check if a lead with a specific URL exists
+// @desc    Check if a lead with a specific URL or Company Name exists
 // @access  Private (Admin, Manager, BD Executive)
 router.get('/check', auth, async (req, res) => {
     try {
-        const { url } = req.query;
-        if (!url) {
-            return res.status(400).json({ message: 'Website URL is required for checking.' });
+        const queryParam = req.query.query || req.query.url;
+        if (!queryParam) {
+            return res.status(400).json({ message: 'Website URL or Company Name is required for checking.' });
         }
 
-        // Search for lead with this URL
-        const normalizedUrl = url.trim().toLowerCase();
-        const lead = await Lead.findOne({ website_url: normalizedUrl });
+        // Search for lead with this URL or Company Name
+        const normalizedQuery = queryParam.trim();
+        const searchRegex = new RegExp(`^${normalizedQuery}$`, 'i');
+
+        const lead = await Lead.findOne({
+            $or: [
+                { website_url: normalizedQuery.toLowerCase() },
+                { company_name: searchRegex }
+            ]
+        });
+
         if (!lead) {
-            return res.status(404).json({ message: 'No lead found with this website URL.' });
+            return res.status(404).json({ message: 'No lead found with this website URL or company name.' });
         }
 
         // Add ownership check for non-admins
@@ -229,26 +237,34 @@ router.post('/', auth, async (req, res) => {
         const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
 
         // Basic validation
-        if (!website_url) {
-            return res.status(400).json({ message: 'Please provide website URL.' });
+        if (!website_url && !company_name) {
+            return res.status(400).json({ message: 'Please provide either a Website URL or a Company Name.' });
         }
 
         if (status !== 'incomplete' && !company_name) {
             return res.status(400).json({ message: 'Company name is required for approved leads.' });
         }
 
-        const normalizedUrl = website_url.trim().toLowerCase();
-
-        // Check if website already exists
-        const existingLead = await Lead.findOne({ website_url: normalizedUrl });
-        if (existingLead) {
-            return res.status(400).json({ message: 'A lead with this website already exists.' });
+        let normalizedUrl = undefined;
+        if (website_url) {
+            normalizedUrl = website_url.trim().toLowerCase();
+            // Check if website already exists
+            const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+            if (existingLead) {
+                return res.status(400).json({ message: 'A lead with this website already exists.' });
+            }
         }
 
-        const newLead = new Lead({
+        if (company_name) {
+            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+            if (existingNameLead) {
+                return res.status(400).json({ message: 'A lead with this company name already exists.' });
+            }
+        }
+
+        const leadData = {
             company_name,
             company_email,
-            website_url: normalizedUrl,
             company_size,
             industry_name,
             linkedin_link,
@@ -258,7 +274,13 @@ router.post('/', auth, async (req, res) => {
             assignedTo: assignedTo || [],
             points_of_contact: processedPocs,
             status: leadStatus || 'approved'
-        });
+        };
+
+        if (normalizedUrl) {
+            leadData.website_url = normalizedUrl;
+        }
+
+        const newLead = new Lead(leadData);
 
         const lead = await newLead.save();
         const populatedLead = await Lead.findById(lead._id)
@@ -582,8 +604,29 @@ router.put('/:id', auth, async (req, res) => {
         const oldAssignedBy = oldLead?.assignedBy?._id?.toString();
         const oldPocCount = oldLead?.points_of_contact?.length || 0;
 
+        // Update POCs if provided
+        if (points_of_contact) {
+            // Uniqueness check for POCs within this single lead
+            const pocError = validatePOCs(points_of_contact);
+            if (pocError) return res.status(400).json({ message: pocError });
+
+            // Preserve old IDs & statuses if updated from modal
+            const oldPocs = oldLead.points_of_contact || [];
+
+            // Re-merge array
+            oldLead.points_of_contact = points_of_contact.map(np => {
+                const existing = oldPocs.find(op => op._id.toString() === np._id?.toString());
+                const approvalStatus = existing ? existing.approvalStatus : (oldLead.status === 'incomplete' ? 'pending' : 'approved');
+
+                return {
+                    ...np,
+                    approvalStatus
+                };
+            });
+        }
+
         // Website uniqueness check (if changed)
-        let normalizedUrl = website_url;
+        let normalizedUrl = undefined;
         if (website_url) {
             normalizedUrl = website_url.trim().toLowerCase();
         }
@@ -595,18 +638,25 @@ router.put('/:id', auth, async (req, res) => {
             }
         }
 
+        // Company Name uniqueness check (if changed)
+        if (company_name && company_name.trim().toLowerCase() !== (oldLead.company_name || '').toLowerCase()) {
+            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+            if (existingNameLead) {
+                return res.status(400).json({ message: 'A lead with this company name already exists.' });
+            }
+        }
+
         // Prepare update data
         const updateData = {};
-        if (company_name !== undefined) updateData.company_name = company_name;
-        if (company_email !== undefined) updateData.company_email = company_email;
-        if (normalizedUrl && req.user.role !== 'BD Executive') updateData.website_url = normalizedUrl;
-        if (company_size !== undefined) updateData.company_size = company_size;
-        if (industry_name !== undefined) updateData.industry_name = industry_name;
+        if (company_name !== undefined) oldLead.company_name = company_name;
+        if (company_email !== undefined) oldLead.company_email = company_email;
+        if (normalizedUrl !== undefined) oldLead.website_url = normalizedUrl;
+        if (company_size !== undefined) oldLead.company_size = company_size;
+        if (industry_name !== undefined) oldLead.industry_name = industry_name;
         if (linkedin_link !== undefined) updateData.linkedin_link = linkedin_link;
         if (stage) updateData.stage = stage;
         if (assignedBy && req.user.role !== 'BD Executive') updateData.assignedBy = assignedBy;
         if (assignedTo !== undefined) updateData.assignedTo = assignedTo;
-
         if (points_of_contact) {
             // POC uniqueness check
             const pocError = validatePOCs(points_of_contact);
@@ -1177,8 +1227,8 @@ router.post('/bulk-upload', auth, async (req, res) => {
                 } = row;
 
                 // Basic validation
-                if (!company_name || !website_url) {
-                    throw new Error(`Row ${i + 1}: Company name and website URL are mandatory.`);
+                if (!company_name && !website_url) {
+                    throw new Error(`Row ${i + 1}: Either Company name or Website URL is mandatory.`);
                 }
 
                 // Determine final assigned_by user ID
@@ -1199,11 +1249,14 @@ router.post('/bulk-upload', auth, async (req, res) => {
                 if (pocError) throw new Error(`Row ${i + 1}: ${pocError}`);
 
                 // Prepare lead data
-                const normalizedUrl = website_url.trim().toLowerCase();
+                let normalizedUrl = undefined;
+                if (website_url) {
+                    normalizedUrl = website_url.trim().toLowerCase();
+                }
+
                 const leadData = {
                     company_name,
                     company_email,
-                    website_url: normalizedUrl,
                     company_size,
                     industry_name,
                     linkedin_link,
@@ -1213,9 +1266,24 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     points_of_contact: (points_of_contact || []).map(p => ({ ...p, approvalStatus: 'approved' }))
                 };
 
+                if (normalizedUrl) {
+                    leadData.website_url = normalizedUrl;
+                }
+
                 // Use findOneAndUpdate with upsert
-                // We search by website_url as it's the unique identifier mentioned
-                const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+                let existingLead = null;
+                if (normalizedUrl) {
+                    existingLead = await Lead.findOne({ website_url: normalizedUrl });
+                } else if (company_name) {
+                    existingLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+                }
+
+                if (company_name) {
+                    const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+                    if (existingNameLead && (!existingLead || existingLead._id.toString() !== existingNameLead._id.toString())) {
+                        throw new Error(`Row ${i + 1}: A lead with company name "${company_name}" already exists.`);
+                    }
+                }
 
                 if (existingLead) {
                     // Update existing lead fields

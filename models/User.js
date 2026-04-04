@@ -71,6 +71,10 @@ const userSchema = new mongoose.Schema({
         type: Object,
         default: null
     },
+    profile_photo: {
+        type: String,
+        default: null
+    },
     poc_bucket: [{
         leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
         pocId: { type: mongoose.Schema.Types.ObjectId },

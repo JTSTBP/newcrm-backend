@@ -3,6 +3,25 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Attendance = require('../models/Attendance');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Multer Config
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = path.join(__dirname, '../uploads');
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir);
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'profile-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({ storage: storage });
 
 // @route   POST /api/auth/login
 // @desc    Authenticate user & get token
@@ -119,6 +138,7 @@ router.post('/login', async (req, res) => {
                 date_of_joining: user.date_of_joining,
                 dob: user.dob,
                 appPassword: user.appPassword,
+                profile_photo: user.profile_photo,
                 createdAt: user.created_at,
                 updatedAt: user.updated_at,
                 lastLogin: user.lastLogin
@@ -133,9 +153,9 @@ router.post('/login', async (req, res) => {
 const auth = require('../middleware/authMiddleware');
 
 // @route   PUT /api/auth/profile
-// @desc    Update user profile (name, email, phone)
+// @desc    Update user profile (name, email, phone, optional photo)
 // @access  Private
-router.put('/profile', auth, async (req, res) => {
+router.put('/profile', auth, upload.single('profile_photo'), async (req, res) => {
     const { name, email, phone, personal_email, dob } = req.body;
 
     try {
@@ -163,8 +183,13 @@ router.put('/profile', auth, async (req, res) => {
         }
 
         if (name) user.name = name;
-        if (personal_email) user.personal_email = personal_email;
-        if (dob) user.dob = dob;
+        if (personal_email !== undefined) user.personal_email = personal_email;
+        if (dob !== undefined) user.dob = dob;
+
+        // Check if an image was uploaded
+        if (req.file) {
+            user.profile_photo = req.file.filename;
+        }
 
         await user.save();
 
@@ -178,6 +203,7 @@ router.put('/profile', auth, async (req, res) => {
             personal_email: user.personal_email,
             dob: user.dob,
             appPassword: user.appPassword,
+            profile_photo: user.profile_photo,
             createdAt: user.created_at,
             updatedAt: user.updated_at,
             lastLogin: user.lastLogin
@@ -271,6 +297,7 @@ router.post('/users', auth, async (req, res) => {
             date_of_joining: newUser.date_of_joining,
             dob: newUser.dob,
             reporter: newUser.reporter,
+            profile_photo: newUser.profile_photo,
             createdAt: newUser.created_at
         });
     } catch (err) {
@@ -328,6 +355,7 @@ router.put('/users/:id', auth, async (req, res) => {
             date_of_joining: user.date_of_joining,
             dob: user.dob,
             reporter: user.reporter,
+            profile_photo: user.profile_photo,
             updatedAt: user.updated_at
         });
     } catch (err) {

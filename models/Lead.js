@@ -42,7 +42,7 @@ const LeadSchema = new mongoose.Schema(
         company_email: { type: String },
         company_info: { type: String },
         company_size: { type: String },
-        website_url: { type: String, unique: true, required: true },
+        website_url: { type: String, unique: true, sparse: true },
         status: {
             type: String,
             enum: ["incomplete", "approved", "rejected"],
