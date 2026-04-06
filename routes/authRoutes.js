@@ -156,7 +156,7 @@ const auth = require('../middleware/authMiddleware');
 // @desc    Update user profile (name, email, phone, optional photo)
 // @access  Private
 router.put('/profile', auth, upload.single('profile_photo'), async (req, res) => {
-    const { name, email, phone, personal_email, dob } = req.body;
+    const { name, email, phone, personal_email, dob, delete_photo } = req.body;
 
     try {
         let user = await User.findById(req.user.id);
@@ -186,8 +186,10 @@ router.put('/profile', auth, upload.single('profile_photo'), async (req, res) =>
         if (personal_email !== undefined) user.personal_email = personal_email;
         if (dob !== undefined) user.dob = dob;
 
-        // Check if an image was uploaded
-        if (req.file) {
+        // Check if an image was uploaded or deleted
+        if (delete_photo === 'true') {
+            user.profile_photo = null;
+        } else if (req.file) {
             user.profile_photo = req.file.filename;
         }
 
