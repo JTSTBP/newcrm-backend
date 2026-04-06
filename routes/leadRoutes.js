@@ -648,11 +648,11 @@ router.put('/:id', auth, async (req, res) => {
 
         // Prepare update data
         const updateData = {};
-        if (company_name !== undefined) oldLead.company_name = company_name;
-        if (company_email !== undefined) oldLead.company_email = company_email;
-        if (normalizedUrl !== undefined) oldLead.website_url = normalizedUrl;
-        if (company_size !== undefined) oldLead.company_size = company_size;
-        if (industry_name !== undefined) oldLead.industry_name = industry_name;
+        if (company_name !== undefined) updateData.company_name = company_name;
+        if (company_email !== undefined) updateData.company_email = company_email;
+        if (normalizedUrl !== undefined) updateData.website_url = normalizedUrl;
+        if (company_size !== undefined) updateData.company_size = company_size;
+        if (industry_name !== undefined) updateData.industry_name = industry_name;
         if (linkedin_link !== undefined) updateData.linkedin_link = linkedin_link;
         if (stage) updateData.stage = stage;
         if (assignedBy && req.user.role !== 'BD Executive') updateData.assignedBy = assignedBy;
