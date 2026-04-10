@@ -318,17 +318,58 @@ router.get('/pocs', auth, async (req, res) => {
         const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
         const search = req.query.search || '';
+        const { leadStage, pocStage, assignedBy, startDate, endDate } = req.query;
 
         const pipeline = [];
 
+        // Lead Match conditions
+        let leadMatch = {
+            status: { $nin: ['incomplete', 'rejected'] }
+        };
+
         // Enforce user isolation for non-admins
         if (req.user.role !== 'Admin') {
-            pipeline.push({ $match: { assignedBy: new mongoose.Types.ObjectId(req.user.id) } });
+            leadMatch.assignedBy = new mongoose.Types.ObjectId(req.user.id);
+        } else if (assignedBy && mongoose.Types.ObjectId.isValid(assignedBy)) {
+            leadMatch.assignedBy = new mongoose.Types.ObjectId(assignedBy);
+        }
+
+        if (leadStage) {
+            leadMatch.stage = leadStage;
+        }
+
+        if (startDate || endDate) {
+            let dateFilter = {};
+            if (startDate) {
+                const start = new Date(startDate);
+                if (!isNaN(start.getTime())) dateFilter.$gte = start;
+            }
+            if (endDate) {
+                const end = new Date(endDate);
+                if (!isNaN(end.getTime())) {
+                    end.setHours(23, 59, 59, 999);
+                    dateFilter.$lte = end;
+                }
+            }
+            if (Object.keys(dateFilter).length > 0) {
+                leadMatch.createdAt = dateFilter;
+            }
+        }
+
+        if (Object.keys(leadMatch).length > 0) {
+            pipeline.push({ $match: leadMatch });
         }
 
         pipeline.push(
             { $unwind: "$points_of_contact" },
-            { $match: { "points_of_contact.approvalStatus": { $ne: 'pending' } } },
+            { $match: { "points_of_contact.approvalStatus": { $ne: 'pending' } } }
+        );
+
+        if (pocStage) {
+            pipeline.push({ $match: { "points_of_contact.stage": pocStage } });
+        }
+
+        pipeline.push(
             {
                 $lookup: {
                     from: "users",
