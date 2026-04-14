@@ -133,7 +133,8 @@ router.get('/check', auth, async (req, res) => {
 
         // Search for lead with this URL or Company Name
         const normalizedQuery = queryParam.trim();
-        const searchRegex = new RegExp(`^${normalizedQuery}$`, 'i');
+        const escapedQuery = normalizedQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+        const searchRegex = new RegExp(`^\\s*${escapedQuery}\\s*$`, 'i');
 
         const lead = await Lead.findOne({
             $or: [
@@ -200,7 +201,7 @@ router.post('/', auth, async (req, res) => {
             return res.status(403).json({ message: 'Access denied.' });
         }
 
-        const {
+        let {
             company_name,
             company_email,
             website_url,
@@ -213,6 +214,8 @@ router.post('/', auth, async (req, res) => {
             points_of_contact,
             status
         } = req.body;
+
+        if (company_name) company_name = company_name.trim();
 
         // POC uniqueness check
         const pocError = validatePOCs(points_of_contact || []);
@@ -256,7 +259,8 @@ router.post('/', auth, async (req, res) => {
         }
 
         if (company_name) {
-            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+            const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
             if (existingNameLead) {
                 return res.status(400).json({ message: 'A lead with this company name already exists.' });
             }
@@ -611,7 +615,7 @@ router.put('/:id', auth, async (req, res) => {
             return res.status(403).json({ message: 'Access denied.' });
         }
 
-        const {
+        let {
             company_name,
             company_email,
             website_url,
@@ -624,6 +628,8 @@ router.put('/:id', auth, async (req, res) => {
             points_of_contact,
             status
         } = req.body;
+
+        if (company_name) company_name = company_name.trim();
 
         const oldLead = await Lead.findById(req.params.id)
             .populate('assignedBy', 'name')
@@ -680,8 +686,9 @@ router.put('/:id', auth, async (req, res) => {
         }
 
         // Company Name uniqueness check (if changed)
-        if (company_name && company_name.trim().toLowerCase() !== (oldLead.company_name || '').toLowerCase()) {
-            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
+        if (company_name && company_name.toLowerCase() !== (oldLead.company_name || '').trim().toLowerCase()) {
+            const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
             if (existingNameLead) {
                 return res.status(400).json({ message: 'A lead with this company name already exists.' });
             }
