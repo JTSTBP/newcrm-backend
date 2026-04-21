@@ -16,11 +16,18 @@ app.use(express.json());
 
 // Database Connection
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log('MongoDB Connected successfully');
-        startNotificationJob(); // Start push notification background job
-    })
-    .catch(err => console.error('MongoDB connection error:', err));
+  .then(() => {
+    console.log("DB connected");
+    startNotificationJob(); // Start push notification background job
+
+    app.listen(PORT || 5000, () => {
+      console.log("Server running");
+    });
+  })
+  .catch(err => {
+    console.error("DB connection failed:", err);
+    process.exit(1);
+  });
 
 // Routes
 const authRoutes = require('./routes/authRoutes');
@@ -49,7 +56,4 @@ app.use((req, res) => {
 // Basic Route
 
 
-// Start Server
-app.listen(PORT, () => {
-    console.log(`Server is successfully running on port ${PORT}`);
-});
+// Server start moved to DB connection block
