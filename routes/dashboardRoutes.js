@@ -418,10 +418,23 @@ router.get('/bd', auth, async (req, res) => {
 router.get('/bd-reports', auth, async (req, res) => {
     try {
         const userId = req.user.id;
+        const { startDate, endDate } = req.query;
+
+        let leadQuery = { assignedBy: new mongoose.Types.ObjectId(userId) };
+        let activityQuery = { userId: new mongoose.Types.ObjectId(userId) };
+
+        if (startDate && endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+
+            leadQuery.createdAt = { $gte: start, $lte: end };
+            activityQuery.timestamp = { $gte: start, $lte: end };
+        }
 
         // 1. Leads by Stage
         const myLeadsByStageRaw = await Lead.aggregate([
-            { $match: { assignedBy: new mongoose.Types.ObjectId(userId) } },
+            { $match: leadQuery },
             { $group: { _id: '$stage', count: { $sum: 1 } } },
             { $sort: { count: -1 } }
         ]);
@@ -432,7 +445,7 @@ router.get('/bd-reports', auth, async (req, res) => {
 
         // 2. Leads by Industry
         const myLeadsByIndustryRaw = await Lead.aggregate([
-            { $match: { assignedBy: new mongoose.Types.ObjectId(userId) } },
+            { $match: leadQuery },
             { $group: { _id: '$industry_name', count: { $sum: 1 } } },
             { $sort: { count: -1 } },
             { $limit: 10 }
@@ -442,17 +455,19 @@ router.get('/bd-reports', auth, async (req, res) => {
             value: item.count
         }));
 
-        // 3. Monthly Calls Trend (Last 6 Months)
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        // 3. Monthly Calls Trend
+        let monthlyTimelineMatch = activityQuery;
+        if (!startDate || !endDate) {
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+            monthlyTimelineMatch = {
+                ...activityQuery,
+                timestamp: { $gte: sixMonthsAgo }
+            };
+        }
 
         const myMonthlyCallsRaw = await CallActivity.aggregate([
-            {
-                $match: {
-                    userId: new mongoose.Types.ObjectId(userId),
-                    timestamp: { $gte: sixMonthsAgo }
-                }
-            },
+            { $match: monthlyTimelineMatch },
             {
                 $group: {
                     _id: { month: { $month: "$timestamp" }, year: { $year: "$timestamp" } },
@@ -470,7 +485,7 @@ router.get('/bd-reports', auth, async (req, res) => {
 
         // 4. Call Outcomes Breakdown
         const myCallOutcomesRaw = await CallActivity.aggregate([
-            { $match: { userId: new mongoose.Types.ObjectId(userId) } },
+            { $match: activityQuery },
             { $group: { _id: '$stage', count: { $sum: 1 } } },
             { $sort: { count: -1 } }
         ]);
