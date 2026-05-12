@@ -225,7 +225,7 @@ router.get('/users/list', auth, async (req, res) => {
             return res.status(403).json({ message: 'Access denied.' });
         }
 
-        const users = await User.find({}, 'name role').sort({ name: 1 });
+        const users = await User.find({}, 'name role status').sort({ name: 1 });
         res.json(users);
     } catch (err) {
         console.error('Fetch user list error:', err);

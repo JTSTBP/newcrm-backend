@@ -158,7 +158,7 @@ router.get('/check', auth, async (req, res) => {
             }
         }
 
-        res.json({ id: lead._id, company_name: lead.company_name });
+        res.json({ id: lead._id, company_name: lead.company_name, status: lead.status });
     } catch (err) {
         console.error('Check lead error:', err);
         res.status(500).json({ message: 'Server Error' });
