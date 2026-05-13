@@ -1546,4 +1546,97 @@ router.post('/:leadId/poc/:pocId/remark', auth, async (req, res) => {
     }
 });
 
+// @route   DELETE /api/leads/:leadId/remark/:remarkId
+// @desc    Delete a specific remark from a lead
+// @access  Private (Admin)
+router.delete('/:leadId/remark/:remarkId', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        }
+
+        const { leadId, remarkId } = req.params;
+
+        const lead = await Lead.findById(leadId);
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        const remarkToDelete = lead.remarks.id(remarkId);
+        if (!remarkToDelete) return res.status(404).json({ message: 'Remark not found' });
+
+        // Remove the remark
+        await Lead.findByIdAndUpdate(
+            leadId,
+            { $pull: { remarks: { _id: remarkId } } },
+            { new: true }
+        );
+
+        // Log activity
+        await logActivity({
+            leadId,
+            type: 'Remark Deleted',
+            description: `A remark by ${remarkToDelete.profile?.name || 'Unknown'} was deleted by Admin.`,
+            userId: req.user.id,
+            userName: req.user.name || 'Admin',
+            metadata: { remarkContent: remarkToDelete.content }
+        });
+
+        res.json({ message: 'Remark deleted successfully' });
+    } catch (err) {
+        console.error('Delete remark error:', err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   DELETE /api/leads/:leadId/remarks/bulk
+// @desc    Bulk delete remarks from a lead
+// @access  Private (Admin)
+router.delete('/:leadId/remarks/bulk', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        }
+
+        const { leadId } = req.params;
+        const { remarkIds } = req.body;
+
+        if (!remarkIds || !Array.isArray(remarkIds) || remarkIds.length === 0) {
+            return res.status(400).json({ message: 'No remark IDs provided' });
+        }
+
+        const lead = await Lead.findById(leadId);
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        // Filter valid remark IDs that exist in the lead
+        const validRemarkIds = remarkIds.filter(id => lead.remarks.id(id));
+
+        if (validRemarkIds.length === 0) {
+            return res.status(404).json({ message: 'None of the provided remarks found' });
+        }
+
+        // Remove the remarks
+        await Lead.findByIdAndUpdate(
+            leadId,
+            { $pull: { remarks: { _id: { $in: validRemarkIds } } } },
+            { new: true }
+        );
+
+        // Log activity
+        await logActivity({
+            leadId,
+            type: 'Remarks Bulk Deleted',
+            description: `${validRemarkIds.length} remarks were deleted by Admin.`,
+            userId: req.user.id,
+            userName: req.user.name || 'Admin',
+            metadata: { deletedCount: validRemarkIds.length }
+        });
+
+        res.json({ message: `Successfully deleted ${validRemarkIds.length} remarks` });
+    } catch (err) {
+        console.error('Bulk delete remarks error:', err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
 module.exports = router;
+
+
