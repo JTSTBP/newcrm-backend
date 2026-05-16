@@ -399,26 +399,45 @@ router.get('/pocs', auth, async (req, res) => {
         }
 
         pipeline.push({
+            $group: {
+                _id: "$_id",
+                company_name: { $first: "$company_name" },
+                assignedUser: { $first: "$assignedUser" },
+                createdAt: { $first: "$createdAt" },
+                remarks: { $first: "$remarks" },
+                pocs: { $push: "$points_of_contact" }
+            }
+        });
+
+        pipeline.push({
             $facet: {
                 metadata: [{ $count: "total" }],
                 data: [
-                    { $sort: { createdAt: -1, _id: -1, "points_of_contact._id": -1 } },
+                    { $sort: { createdAt: -1, _id: -1 } },
                     { $skip: skip },
                     { $limit: limit },
                     {
                         $project: {
                             lead_id: "$_id",
                             company_name: 1,
-                            poc_id: "$points_of_contact._id",
-                            poc_name: "$points_of_contact.name",
-                            designation: "$points_of_contact.designation",
-                            contact: "$points_of_contact.phone",
-                            linkedin_url: "$points_of_contact.linkedin_url",
-                            createdAt: "$createdAt",
                             assignedBy: "$assignedUser.name",
-                            latest_remark_id: "$points_of_contact.latest_remark_id",
+                            createdAt: 1,
                             remarks: 1,
-                            stage: "$points_of_contact.stage"
+                            pocs: {
+                                $map: {
+                                    input: "$pocs",
+                                    as: "p",
+                                    in: {
+                                        poc_id: "$$p._id",
+                                        name: "$$p.name",
+                                        designation: "$$p.designation",
+                                        contact: "$$p.phone",
+                                        linkedin_url: "$$p.linkedin_url",
+                                        stage: "$$p.stage",
+                                        latest_remark_id: "$$p.latest_remark_id"
+                                    }
+                                }
+                            }
                         }
                     }
                 ]
@@ -427,57 +446,62 @@ router.get('/pocs', auth, async (req, res) => {
 
         const pocsData = await Lead.aggregate(pipeline);
 
-        const totalPocs = pocsData[0]?.metadata[0]?.total || 0;
-        const paginatedPocs = pocsData[0]?.data || [];
+        const totalCompanies = pocsData[0]?.metadata[0]?.total || 0;
+        const paginatedCompanies = pocsData[0]?.data || [];
 
-        const formattedPocs = paginatedPocs.map(poc => {
-            let latestRemarkContent = "";
-            let pocRemarks = [];
+        const formattedResults = paginatedCompanies.map(company => {
+            const companyPocs = company.pocs.map(poc => {
+                let latestRemarkContent = "";
+                let pocRemarks = [];
 
-            if (Array.isArray(poc.remarks)) {
-                // Filter remarks for this specific POC
-                pocRemarks = poc.remarks.filter(r => r.poc_id && r.poc_id.toString() === poc.poc_id.toString());
-            }
+                if (Array.isArray(company.remarks)) {
+                    pocRemarks = company.remarks.filter(r => r.poc_id && r.poc_id.toString() === poc.poc_id.toString());
+                }
 
-            if (poc.latest_remark_id && pocRemarks.length > 0) {
-                const latestRemark = pocRemarks.find(
-                    r => r._id && r._id.toString() === poc.latest_remark_id.toString()
-                );
-                if (latestRemark) {
-                    latestRemarkContent = latestRemark.content;
-                } else {
+                if (poc.latest_remark_id && pocRemarks.length > 0) {
+                    const latestRemark = pocRemarks.find(
+                        r => r._id && r._id.toString() === poc.latest_remark_id.toString()
+                    );
+                    if (latestRemark) {
+                        latestRemarkContent = latestRemark.content;
+                    } else {
+                        latestRemarkContent = pocRemarks[pocRemarks.length - 1].content;
+                    }
+                } else if (pocRemarks.length > 0) {
                     latestRemarkContent = pocRemarks[pocRemarks.length - 1].content;
                 }
-            } else if (pocRemarks.length > 0) {
-                latestRemarkContent = pocRemarks[pocRemarks.length - 1].content;
-            }
+
+                return {
+                    poc_id: poc.poc_id,
+                    name: poc.name,
+                    designation: poc.designation,
+                    contact: poc.contact,
+                    linkedin_url: poc.linkedin_url,
+                    remarks: latestRemarkContent,
+                    remarks_count: pocRemarks.length,
+                    all_remarks: pocRemarks.map(r => ({
+                        content: r.content,
+                        created_at: r.created_at,
+                        by: r.profile?.name || 'Unknown'
+                    })).reverse(),
+                    stage: poc.stage || 'New'
+                };
+            });
 
             return {
-                lead_id: poc.lead_id,
-                company_name: poc.company_name,
-                poc_id: poc.poc_id,
-                name: poc.poc_name,
-                designation: poc.designation,
-                contact: poc.contact,
-                linkedin_url: poc.linkedin_url,
-                created_at: poc.createdAt,
-                assigned_by: poc.assignedBy,
-                remarks: latestRemarkContent,
-                remarks_count: pocRemarks.length,
-                all_remarks: pocRemarks.map(r => ({
-                    content: r.content,
-                    created_at: r.created_at,
-                    by: r.profile?.name || 'Unknown'
-                })).reverse(), // Latest first
-                stage: poc.stage || 'New'
+                lead_id: company.lead_id,
+                company_name: company.company_name,
+                created_at: company.createdAt,
+                assigned_by: company.assignedBy,
+                pocs: companyPocs
             };
         });
 
         res.json({
-            pocs: formattedPocs,
+            companies: formattedResults,
             currentPage: page,
-            totalPages: Math.ceil(totalPocs / limit),
-            totalPocs
+            totalPages: Math.ceil(totalCompanies / limit),
+            totalCompanies: totalCompanies
         });
     } catch (err) {
         console.error('Fetch all POCs error:', err);

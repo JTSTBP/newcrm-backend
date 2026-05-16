@@ -248,17 +248,22 @@ router.get('/agent-calls', auth, async (req, res) => {
             .populate('leadId', 'company_name points_of_contact');
 
         const formattedCalls = calls.map(call => {
-            // Find POC name from lead's points_of_contact
+            // Find POC details from lead's points_of_contact
             let pocName = 'Unknown';
+            let designation = 'N/A';
             if (call.leadId && call.leadId.points_of_contact) {
                 const poc = call.leadId.points_of_contact.id(call.pocId);
-                if (poc) pocName = poc.name;
+                if (poc) {
+                    pocName = poc.name;
+                    designation = poc.designation || 'N/A';
+                }
             }
 
             return {
                 _id: call._id,
                 companyName: call.leadId ? call.leadId.company_name : 'Deleted Lead',
                 pocName: pocName,
+                designation: designation,
                 phoneNumber: call.phone,
                 callType: call.device || 'Manual',
                 timestamp: call.timestamp,
