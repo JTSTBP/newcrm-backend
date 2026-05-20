@@ -91,6 +91,38 @@ router.post('/login', async (req, res) => {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
 
+            // Auto-logout previous days' active sessions
+            try {
+                const previousAttendances = await Attendance.find({
+                    user_id: user.id,
+                    date: { $lt: today }
+                });
+
+                for (let att of previousAttendances) {
+                    let updated = false;
+                    att.sessions.forEach(s => {
+                        if (s.isActive || !s.logoutTime) {
+                            s.isActive = false;
+                            if (!s.logoutTime) {
+                                // Default to 18:30:00 (standard logout time) if loginTime is earlier.
+                                // Otherwise default to 23:59:59.
+                                if (s.loginTime && s.loginTime < "18:30:00") {
+                                    s.logoutTime = "18:30:00";
+                                } else {
+                                    s.logoutTime = "23:59:59";
+                                }
+                            }
+                            updated = true;
+                        }
+                    });
+                    if (updated) {
+                        await att.save(); // Triggers pre-save hook to recalculate duration & status
+                    }
+                }
+            } catch (prevErr) {
+                console.error('Error auto-logging out previous sessions:', prevErr);
+            }
+
             const getFormattedTime = () => {
                 const now = new Date();
                 return now.toTimeString().split(' ')[0];

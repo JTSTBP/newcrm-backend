@@ -18,7 +18,8 @@ router.get('/admin', auth, async (req, res) => {
         }
 
         const { startDate, endDate } = req.query;
-        let leadQuery = {};
+        // Only count approved leads — exclude incomplete/rejected (matches Company tab behaviour)
+        let leadQuery = { status: { $nin: ['incomplete', 'rejected'] } };
         let activityQuery = {};
 
         if (startDate && endDate) {
@@ -99,8 +100,9 @@ router.get('/admin-reports', auth, async (req, res) => {
             return res.status(403).json({ message: 'Access denied' });
         }
 
-        const { startDate, endDate } = req.query;
-        let leadQuery = {};
+        const { startDate, endDate, agentId } = req.query;
+        // Only count approved leads — exclude incomplete/rejected (matches Company tab behaviour)
+        let leadQuery = { status: { $nin: ['incomplete', 'rejected'] } };
         let activityQuery = {};
 
         if (startDate && endDate) {
@@ -110,6 +112,11 @@ router.get('/admin-reports', auth, async (req, res) => {
 
             leadQuery.createdAt = { $gte: start, $lte: end };
             activityQuery.timestamp = { $gte: start, $lte: end };
+        }
+
+        if (agentId) {
+            leadQuery.assignedBy = new mongoose.Types.ObjectId(agentId);
+            activityQuery.userId = new mongoose.Types.ObjectId(agentId);
         }
 
         // 1. Leads by Stage
@@ -138,11 +145,14 @@ router.get('/admin-reports', auth, async (req, res) => {
         // 3. Monthly Calls Trend
         let monthlyTimelineMatch = {};
         if (startDate && endDate) {
-            monthlyTimelineMatch = activityQuery;
+            monthlyTimelineMatch = { ...activityQuery };
         } else {
             const sixMonthsAgo = new Date();
             sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
             monthlyTimelineMatch = { timestamp: { $gte: sixMonthsAgo } };
+            if (agentId) {
+                monthlyTimelineMatch.userId = new mongoose.Types.ObjectId(agentId);
+            }
         }
 
         const monthlyCallsRaw = await CallActivity.aggregate([
@@ -171,10 +181,29 @@ router.get('/admin-reports', auth, async (req, res) => {
         };
 
         // 5. Agent Performance Matrix
-        const agentPerformanceRaw = await CallActivity.aggregate([
+        let agentPerformanceRaw;
+        if (agentId) {
+            agentPerformanceRaw = [{
+                _id: new mongoose.Types.ObjectId(agentId),
+                callCount: await CallActivity.countDocuments(activityQuery)
+            }];
+        } else {
+            agentPerformanceRaw = await CallActivity.aggregate([
+                { $match: activityQuery },
+                { $group: { _id: "$userId", callCount: { $sum: 1 } } }
+            ]);
+        }
+
+        // 6. Call Outcomes Breakdown (New)
+        const callOutcomesRaw = await CallActivity.aggregate([
             { $match: activityQuery },
-            { $group: { _id: "$userId", callCount: { $sum: 1 } } }
+            { $group: { _id: '$stage', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
         ]);
+        const callOutcomes = callOutcomesRaw.map(item => ({
+            name: item._id || 'Uncategorized',
+            value: item.count
+        }));
 
         let agentPerformance = await Promise.all(agentPerformanceRaw.map(async (item) => {
             const user = await User.findById(item._id).select('name');
@@ -211,7 +240,8 @@ router.get('/admin-reports', auth, async (req, res) => {
             leadsByIndustry,
             monthlyTimeline,
             agentPerformance,
-            summaryStats
+            summaryStats,
+            callOutcomes
         });
 
     } catch (err) {
@@ -295,17 +325,19 @@ router.get('/bd', auth, async (req, res) => {
         startOfWeek.setHours(0, 0, 0, 0);
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-        // --- Core lead counts ---
-        const totalLeads = await Lead.countDocuments({ assignedBy: userId });
-        const wonLeads = await Lead.countDocuments({ assignedBy: userId, stage: { $in: ['Won', 'Onboarded'] } });
-        const lostLeads = await Lead.countDocuments({ assignedBy: userId, stage: 'Lost' });
+        // --- Core lead counts (only approved leads — exclude incomplete/rejected) ---
+        const approvedLeadBase = { assignedBy: userId, status: { $nin: ['incomplete', 'rejected'] } };
+
+        const totalLeads = await Lead.countDocuments(approvedLeadBase);
+        const wonLeads = await Lead.countDocuments({ ...approvedLeadBase, stage: { $in: ['Won', 'Onboarded'] } });
+        const lostLeads = await Lead.countDocuments({ ...approvedLeadBase, stage: 'Lost' });
         const activeLeads = totalLeads - wonLeads - lostLeads;
 
         const conversionRate = totalLeads > 0 ? ((wonLeads / totalLeads) * 100).toFixed(1) : '0';
 
         // --- Stage breakdown ---
         const stageBreakdown = await Lead.aggregate([
-            { $match: { assignedBy: new mongoose.Types.ObjectId(userId) } },
+            { $match: { assignedBy: new mongoose.Types.ObjectId(userId), status: { $nin: ['incomplete', 'rejected'] } } },
             { $group: { _id: '$stage', count: { $sum: 1 } } },
             { $sort: { count: -1 } }
         ]);
@@ -348,9 +380,9 @@ router.get('/bd', auth, async (req, res) => {
             completed: false
         });
 
-        // --- New leads this month ---
+        // --- New leads this month (approved only) ---
         const newLeadsThisMonth = await Lead.countDocuments({
-            assignedBy: userId,
+            ...approvedLeadBase,
             createdAt: { $gte: startOfMonth }
         });
 
@@ -384,9 +416,9 @@ router.get('/bd', auth, async (req, res) => {
             { $sort: { count: -1 } }
         ]);
 
-        // --- Leads added this week ---
+        // --- Leads added this week (approved only) ---
         const leadsThisWeek = await Lead.countDocuments({
-            assignedBy: userId,
+            ...approvedLeadBase,
             createdAt: { $gte: startOfWeek }
         });
 
@@ -425,7 +457,11 @@ router.get('/bd-reports', auth, async (req, res) => {
         const userId = req.user.id;
         const { startDate, endDate } = req.query;
 
-        let leadQuery = { assignedBy: new mongoose.Types.ObjectId(userId) };
+        // Only show approved leads — exclude incomplete/rejected (matches Company tab behaviour)
+        let leadQuery = {
+            assignedBy: new mongoose.Types.ObjectId(userId),
+            status: { $nin: ['incomplete', 'rejected'] }
+        };
         let activityQuery = { userId: new mongoose.Types.ObjectId(userId) };
 
         if (startDate && endDate) {
