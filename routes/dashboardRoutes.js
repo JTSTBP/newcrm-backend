@@ -548,4 +548,436 @@ router.get('/bd-reports', auth, async (req, res) => {
     }
 });
 
+// @route   GET /api/dashboard/manager
+// @desc    Get Manager dashboard statistics
+// @access  Private/Manager
+router.get('/manager', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Manager' && req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+
+        const managerId = req.user.id;
+        // Get all active BD Executives reporting to this manager
+        const reporters = await User.find({ reporter: managerId, status: 'Active' });
+        const reporterIds = reporters.map(r => r._id);
+        const allAssociatedUserIds = [new mongoose.Types.ObjectId(managerId), ...reporterIds.map(id => new mongoose.Types.ObjectId(id))];
+
+        const { startDate, endDate } = req.query;
+        let leadQuery = { 
+            status: { $nin: ['incomplete', 'rejected'] },
+            assignedBy: { $in: allAssociatedUserIds }
+        };
+        let activityQuery = {
+            userId: { $in: allAssociatedUserIds }
+        };
+
+        if (startDate && endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+
+            leadQuery.createdAt = { $gte: start, $lte: end };
+            activityQuery.timestamp = { $gte: start, $lte: end };
+        }
+
+        const totalLeads = await Lead.countDocuments(leadQuery);
+        const activeAgents = reporters.length;
+        const totalCalls = await CallActivity.countDocuments(activityQuery);
+        const totalProposalSent = await Lead.countDocuments({ ...leadQuery, stage: 'Proposal Sent' });
+        const totalOnboarded = await Lead.countDocuments({ ...leadQuery, stage: 'Onboarded' });
+
+        const recentActivity = await LeadActivity.find({ performedBy: { $in: allAssociatedUserIds } })
+            .sort({ timestamp: -1 })
+            .limit(10)
+            .populate('leadId', 'company_name')
+            .populate('performedBy', 'name');
+
+        // Team Performance (reporters + manager)
+        const topAgentsRaw = await CallActivity.aggregate([
+            { $match: activityQuery },
+            { $group: { _id: "$userId", callCount: { $sum: 1 } } },
+            { $sort: { callCount: -1 } }
+        ]);
+
+        let teamPerformance = await Promise.all(allAssociatedUserIds.map(async (uid) => {
+            const user = await User.findById(uid).select('name role');
+            if (!user) return null;
+
+            const callItem = topAgentsRaw.find(item => item._id.toString() === uid.toString());
+            const calls = callItem ? callItem.callCount : 0;
+
+            const leadsAssigned = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid
+            });
+
+            const onboardedCount = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid,
+                stage: 'Onboarded'
+            });
+
+            const wonLeads = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid,
+                stage: 'Won'
+            });
+
+            return {
+                _id: uid,
+                name: user.name,
+                role: user.role,
+                calls,
+                leads: leadsAssigned,
+                won: wonLeads,
+                onboarded: onboardedCount,
+                winRate: leadsAssigned > 0 ? Math.round(((wonLeads + onboardedCount) / leadsAssigned) * 100) : 0
+            };
+        }));
+
+        teamPerformance = teamPerformance.filter(Boolean).sort((a, b) => b.calls - a.calls);
+
+        // Call Outcomes breakdown
+        const callOutcomesRaw = await CallActivity.aggregate([
+            { $match: activityQuery },
+            { $group: { _id: '$stage', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+        ]);
+        const callOutcomes = callOutcomesRaw.map(item => ({
+            name: item._id || 'Uncategorized',
+            value: item.count
+        }));
+
+        // Leads by Stage
+        const leadsByStageRaw = await Lead.aggregate([
+            { $match: leadQuery },
+            { $group: { _id: '$stage', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+        ]);
+        const leadsByStage = leadsByStageRaw.map(item => ({
+            name: item._id || 'Unassigned',
+            value: item.count
+        }));
+
+        // Monthly Calls Trend
+        let monthlyTimelineMatch = activityQuery;
+        if (!startDate || !endDate) {
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+            monthlyTimelineMatch = {
+                ...activityQuery,
+                timestamp: { $gte: sixMonthsAgo }
+            };
+        }
+        const monthlyCallsRaw = await CallActivity.aggregate([
+            { $match: monthlyTimelineMatch },
+            {
+                $group: {
+                    _id: { month: { $month: "$timestamp" }, year: { $year: "$timestamp" } },
+                    calls: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id.year": 1, "_id.month": 1 } }
+        ]);
+
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const monthlyTimeline = monthlyCallsRaw.map(item => ({
+            name: `${monthNames[item._id.month - 1]} ${item._id.year.toString().slice(2)}`,
+            calls: item.calls
+        }));
+
+        res.json({
+            stats: {
+                totalLeads,
+                activeAgents,
+                totalCalls,
+                totalProposalSent,
+                totalOnboarded
+            },
+            recentActivity: recentActivity.map(activity => ({
+                _id: activity._id,
+                type: activity.type,
+                description: activity.description,
+                performedByName: activity.performedBy?.name || 'Unknown',
+                timestamp: activity.timestamp,
+                leadId: activity.leadId ? { company_name: activity.leadId.company_name } : undefined
+            })),
+            teamPerformance,
+            callOutcomes,
+            leadsByStage,
+            monthlyTimeline
+        });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   GET /api/dashboard/manager-reports
+// @desc    Get comprehensive chart data for Manager Reports tab
+// @access  Private/Manager
+router.get('/manager-reports', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Manager' && req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+
+        const managerId = req.user.id;
+        const reporters = await User.find({ reporter: managerId, status: 'Active' }).select('name role email phone status date_of_joining profile_photo');
+        const reporterIds = reporters.map(r => r._id);
+        const allAssociatedUserIds = [new mongoose.Types.ObjectId(managerId), ...reporterIds.map(id => new mongoose.Types.ObjectId(id))];
+
+        const { startDate, endDate, agentId } = req.query;
+        let leadQuery = {
+            status: { $nin: ['incomplete', 'rejected'] },
+            assignedBy: { $in: allAssociatedUserIds }
+        };
+        let activityQuery = {
+            userId: { $in: allAssociatedUserIds }
+        };
+
+        if (startDate && endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+
+            leadQuery.createdAt = { $gte: start, $lte: end };
+            activityQuery.timestamp = { $gte: start, $lte: end };
+        }
+
+        // If a specific agent is selected, filter to just that agent
+        if (agentId) {
+            const agentObjId = new mongoose.Types.ObjectId(agentId);
+            // Ensure the agentId is within the manager's team
+            if (!allAssociatedUserIds.some(uid => uid.toString() === agentId)) {
+                return res.status(403).json({ message: 'Agent not in your team' });
+            }
+            leadQuery.assignedBy = agentObjId;
+            activityQuery.userId = agentObjId;
+        }
+
+        // 1. Leads by Stage
+        const leadsByStageRaw = await Lead.aggregate([
+            { $match: leadQuery },
+            { $group: { _id: '$stage', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+        ]);
+        const leadsByStage = leadsByStageRaw.map(item => ({
+            name: item._id || 'Unassigned',
+            value: item.count
+        }));
+
+        // 2. Leads by Industry
+        const leadsByIndustryRaw = await Lead.aggregate([
+            { $match: leadQuery },
+            { $group: { _id: '$industry_name', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 10 }
+        ]);
+        const leadsByIndustry = leadsByIndustryRaw.map(item => ({
+            name: item._id || 'Unknown',
+            value: item.count
+        }));
+
+        // 3. Call Outcomes
+        const callOutcomesRaw = await CallActivity.aggregate([
+            { $match: activityQuery },
+            { $group: { _id: '$stage', count: { $sum: 1 } } },
+            { $sort: { count: -1 } }
+        ]);
+        const callOutcomes = callOutcomesRaw.map(item => ({
+            name: item._id || 'Uncategorized',
+            value: item.count
+        }));
+
+        // 4. Monthly Calls Trend
+        let monthlyTimelineMatch = activityQuery;
+        if (!startDate || !endDate) {
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+            monthlyTimelineMatch = {
+                ...activityQuery,
+                timestamp: { $gte: sixMonthsAgo }
+            };
+        }
+        const monthlyCallsRaw = await CallActivity.aggregate([
+            { $match: monthlyTimelineMatch },
+            {
+                $group: {
+                    _id: { month: { $month: "$timestamp" }, year: { $year: "$timestamp" } },
+                    calls: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id.year": 1, "_id.month": 1 } }
+        ]);
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const monthlyTimeline = monthlyCallsRaw.map(item => ({
+            name: `${monthNames[item._id.month - 1]} ${item._id.year.toString().slice(2)}`,
+            calls: item.calls
+        }));
+
+        // 5. Summary Stats
+        const summaryStats = {
+            totalLeads: await Lead.countDocuments(leadQuery),
+            totalReportees: reporters.length,
+            totalProposalSent: await Lead.countDocuments({ ...leadQuery, stage: 'Proposal Sent' }),
+            totalOnboarded: await Lead.countDocuments({ ...leadQuery, stage: 'Onboarded' }),
+            totalCalls: await CallActivity.countDocuments(activityQuery)
+        };
+
+        // 6. Agent Performance Matrix (Team)
+        let agentPerformanceRaw;
+        if (agentId) {
+            agentPerformanceRaw = [{
+                _id: new mongoose.Types.ObjectId(agentId),
+                callCount: await CallActivity.countDocuments(activityQuery)
+            }];
+        } else {
+            agentPerformanceRaw = await CallActivity.aggregate([
+                { $match: { userId: { $in: allAssociatedUserIds }, ...( activityQuery.timestamp ? { timestamp: activityQuery.timestamp } : {} ) } },
+                { $group: { _id: "$userId", callCount: { $sum: 1 } } }
+            ]);
+        }
+
+        let agentPerformance = await Promise.all(allAssociatedUserIds.map(async (uid) => {
+            const user = await User.findById(uid).select('name role');
+            if (!user) return null;
+
+            const callItem = agentPerformanceRaw.find(item => item._id.toString() === uid.toString());
+            const calls = callItem ? callItem.callCount : 0;
+
+            const leadsAssigned = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid,
+                ...( leadQuery.createdAt ? { createdAt: leadQuery.createdAt } : {} )
+            });
+
+            const leadsWon = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid,
+                stage: 'Won',
+                ...( leadQuery.createdAt ? { createdAt: leadQuery.createdAt } : {} )
+            });
+
+            const leadsOnboarded = await Lead.countDocuments({
+                status: { $nin: ['incomplete', 'rejected'] },
+                assignedBy: uid,
+                stage: 'Onboarded',
+                ...( leadQuery.createdAt ? { createdAt: leadQuery.createdAt } : {} )
+            });
+
+            return {
+                agentId: uid,
+                name: user.name,
+                role: user.role,
+                calls,
+                leads: leadsAssigned,
+                won: leadsWon,
+                onboarded: leadsOnboarded,
+                winRate: leadsAssigned > 0 ? Math.round(((leadsWon + leadsOnboarded) / leadsAssigned) * 100) : 0
+            };
+        }));
+        agentPerformance = agentPerformance.filter(Boolean).sort((a, b) => b.calls - a.calls);
+        if (agentId) {
+            agentPerformance = agentPerformance.filter(a => a.agentId.toString() === agentId);
+        }
+
+        // 7. Reportees List (full info)
+        const manager = await User.findById(managerId).select('name role email');
+        const reporteesList = reporters.map(r => ({
+            _id: r._id,
+            name: r.name,
+            role: r.role,
+            email: r.email,
+            phone: r.phone || 'N/A',
+            status: r.status,
+            date_of_joining: r.date_of_joining,
+            profile_photo: r.profile_photo
+        }));
+
+        res.json({
+            leadsByStage,
+            leadsByIndustry,
+            callOutcomes,
+            monthlyTimeline,
+            summaryStats,
+            agentPerformance,
+            reportees: reporteesList,
+            managerInfo: manager ? { name: manager.name, role: manager.role } : null
+        });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   GET /api/dashboard/manager-agent-calls
+// @desc    Get detailed call logs for a specific agent (Manager scoped)
+// @access  Private/Manager
+router.get('/manager-agent-calls', auth, async (req, res) => {
+    try {
+        if (req.user.role !== 'Manager' && req.user.role !== 'Admin') {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+
+        const managerId = req.user.id;
+        const reporters = await User.find({ reporter: managerId, status: 'Active' });
+        const reporterIds = reporters.map(r => r._id.toString());
+        const allIds = [managerId, ...reporterIds];
+
+        const { agentId, startDate, endDate } = req.query;
+        if (!agentId) {
+            return res.status(400).json({ message: 'Agent ID is required' });
+        }
+
+        // Verify agent is within the manager's team
+        if (!allIds.includes(agentId)) {
+            return res.status(403).json({ message: 'Agent not in your team' });
+        }
+
+        let query = { userId: agentId };
+        if (startDate && endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            query.timestamp = { $gte: start, $lte: end };
+        }
+
+        const calls = await CallActivity.find(query)
+            .sort({ timestamp: -1 })
+            .populate('leadId', 'company_name points_of_contact');
+
+        const formattedCalls = calls.map(call => {
+            let pocName = 'Unknown';
+            let designation = 'N/A';
+            if (call.leadId && call.leadId.points_of_contact) {
+                const poc = call.leadId.points_of_contact.id(call.pocId);
+                if (poc) {
+                    pocName = poc.name;
+                    designation = poc.designation || 'N/A';
+                }
+            }
+
+            return {
+                _id: call._id,
+                companyName: call.leadId ? call.leadId.company_name : 'Deleted Lead',
+                pocName,
+                designation,
+                phoneNumber: call.phone,
+                callType: call.device || 'Manual',
+                timestamp: call.timestamp,
+                remarks: call.remarks || 'No remarks',
+                stageAfterCall: call.stage
+            };
+        });
+
+        res.json(formattedCalls);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
 module.exports = router;
+

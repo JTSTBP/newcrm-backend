@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Lead = require('../models/Lead');
+const User = require('../models/User');
 const CallActivity = require('../models/CallActivity');
 const LeadActivity = require('../models/LeadActivity');
 const Task = require('../models/Task');
@@ -79,11 +80,16 @@ router.get('/', auth, async (req, res) => {
 
         // Enforce user isolation for non-admins
         if (req.user.role !== 'Admin') {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
             const userFilter = {
                 $or: [
-                    { assignedBy: req.user.id },
-                    { createdBy: req.user.id },
-                    { assignedTo: req.user.id }
+                    { assignedBy: { $in: userIds } },
+                    { createdBy: { $in: userIds } },
+                    { assignedTo: { $in: userIds } }
                 ]
             };
             // Use $and to combine with existing query (like status filters)
@@ -149,9 +155,14 @@ router.get('/check', auth, async (req, res) => {
 
         // Add ownership check for non-admins
         if (req.user.role !== 'Admin') {
-            const isOwner = lead.assignedBy?.toString() === req.user.id ||
-                lead.createdBy?.toString() === req.user.id ||
-                (lead.assignedTo && lead.assignedTo.some(id => id.toString() === req.user.id));
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            const isOwner = userIds.includes(lead.assignedBy?.toString()) ||
+                userIds.includes(lead.createdBy?.toString()) ||
+                (lead.assignedTo && lead.assignedTo.some(id => userIds.includes(id.toString())));
 
             if (!isOwner) {
                 return res.status(403).json({ message: 'Access denied. You do not have permission to add POCs to this lead.' });
@@ -333,7 +344,12 @@ router.get('/pocs', auth, async (req, res) => {
 
         // Enforce user isolation for non-admins
         if (req.user.role !== 'Admin') {
-            leadMatch.assignedBy = new mongoose.Types.ObjectId(req.user.id);
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            leadMatch.assignedBy = { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) };
         } else if (assignedBy && mongoose.Types.ObjectId.isValid(assignedBy)) {
             leadMatch.assignedBy = new mongoose.Types.ObjectId(assignedBy);
         }
@@ -520,8 +536,15 @@ router.get('/poc/:pocId', auth, async (req, res) => {
         }
 
         // Enforce data isolation for non-admins
-        if (req.user.role !== 'Admin' && lead.assignedBy._id.toString() !== req.user.id) {
-            return res.status(403).json({ message: 'Access denied. You do not own the lead for this contact.' });
+        if (req.user.role !== 'Admin') {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            if (!userIds.includes(lead.assignedBy._id.toString())) {
+                return res.status(403).json({ message: 'Access denied. You do not own the lead for this contact.' });
+            }
         }
 
         const poc = lead.points_of_contact.find(p => p._id.toString() === req.params.pocId);
@@ -529,7 +552,12 @@ router.get('/poc/:pocId', auth, async (req, res) => {
         // Fetch Tasks (Filtered by user unless Admin)
         const taskQuery = { poc_id: req.params.pocId };
         if (req.user.role !== 'Admin') {
-            taskQuery.user_id = req.user.id;
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            taskQuery.user_id = { $in: userIds };
         }
         const tasks = await Task.find(taskQuery)
             .populate('user_id', 'name')
@@ -592,11 +620,21 @@ router.get('/:id', auth, async (req, res) => {
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         // Enforce user isolation for non-admins
-        const isOwner = lead.assignedBy?._id?.toString() === req.user.id ||
-            lead.createdBy?._id?.toString() === req.user.id ||
-            (lead.assignedTo && lead.assignedTo.some(u => u._id?.toString() === req.user.id));
+        let isOwner = false;
+        if (req.user.role === 'Admin') {
+            isOwner = true;
+        } else {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            isOwner = userIds.includes(lead.assignedBy?._id?.toString()) ||
+                userIds.includes(lead.createdBy?._id?.toString()) ||
+                (lead.assignedTo && lead.assignedTo.some(u => userIds.includes(u._id?.toString())));
+        }
 
-        if (req.user.role !== 'Admin' && !isOwner) {
+        if (!isOwner) {
             return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
 
@@ -663,11 +701,21 @@ router.put('/:id', auth, async (req, res) => {
         if (!oldLead) return res.status(404).json({ message: 'Lead not found' });
 
         // Enforce user isolation for non-admins
-        const isOwner = oldLead.assignedBy?._id?.toString() === req.user.id ||
-            oldLead.createdBy?._id?.toString() === req.user.id ||
-            (oldLead.assignedTo && oldLead.assignedTo.some(u => u._id?.toString() === req.user.id));
+        let isOwner = false;
+        if (req.user.role === 'Admin') {
+            isOwner = true;
+        } else {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            isOwner = userIds.includes(oldLead.assignedBy?._id?.toString()) ||
+                userIds.includes(oldLead.createdBy?._id?.toString()) ||
+                (oldLead.assignedTo && oldLead.assignedTo.some(u => userIds.includes(u._id?.toString())));
+        }
 
-        if (req.user.role !== 'Admin' && !isOwner) {
+        if (!isOwner) {
             return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
 
@@ -911,11 +959,21 @@ router.post('/:id/poc', auth, async (req, res) => {
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         // Enforce user isolation for non-admins
-        const isOwner = lead.assignedBy?.toString() === req.user.id ||
-            lead.createdBy?.toString() === req.user.id ||
-            (lead.assignedTo && lead.assignedTo.some(u => u.toString() === req.user.id));
+        let isOwner = false;
+        if (req.user.role === 'Admin') {
+            isOwner = true;
+        } else {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            isOwner = userIds.includes(lead.assignedBy?.toString()) ||
+                userIds.includes(lead.createdBy?.toString()) ||
+                (lead.assignedTo && lead.assignedTo.some(u => userIds.includes(u.toString())));
+        }
 
-        if (req.user.role !== 'Admin' && !isOwner) {
+        if (!isOwner) {
             return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
 
@@ -975,11 +1033,21 @@ router.put('/:id/poc/:pocId', auth, async (req, res) => {
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         // Enforce user isolation for non-admins
-        const isOwner = lead.assignedBy?.toString() === req.user.id ||
-            lead.createdBy?.toString() === req.user.id ||
-            (lead.assignedTo && lead.assignedTo.some(u => u.toString() === req.user.id));
+        let isOwner = false;
+        if (req.user.role === 'Admin') {
+            isOwner = true;
+        } else {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            isOwner = userIds.includes(lead.assignedBy?.toString()) ||
+                userIds.includes(lead.createdBy?.toString()) ||
+                (lead.assignedTo && lead.assignedTo.some(u => userIds.includes(u.toString())));
+        }
 
-        if (req.user.role !== 'Admin' && !isOwner) {
+        if (!isOwner) {
             return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
 
@@ -1092,8 +1160,8 @@ router.post('/bulk/delete', auth, async (req, res) => {
 // @access  Private (Admin)
 router.patch('/:id/approve', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (req.user.role !== 'Admin' && req.user.role !== 'Manager') {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const lead = await Lead.findById(req.params.id);
@@ -1138,9 +1206,9 @@ router.patch('/:id/approve', auth, async (req, res) => {
         await logActivity({
             leadId: lead._id,
             type: 'Lead Approved',
-            description: `Lead "${lead.company_name || lead.website_url}" and all contacts were approved by Admin.`,
+            description: `Lead "${lead.company_name || lead.website_url}" and all contacts were approved.`,
             userId: req.user.id,
-            userName: req.user.name || 'Admin'
+            userName: req.user.name
         });
 
         res.json({ message: 'Lead and all contacts approved successfully', lead });
@@ -1155,8 +1223,8 @@ router.patch('/:id/approve', auth, async (req, res) => {
 // @access  Private (Admin)
 router.patch('/:id/reject', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (req.user.role !== 'Admin' && req.user.role !== 'Manager') {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const lead = await Lead.findById(req.params.id);
@@ -1177,8 +1245,8 @@ router.patch('/:id/reject', auth, async (req, res) => {
 // @access  Private (Admin)
 router.patch('/:id/approve-poc/:pocId', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (req.user.role !== 'Admin' && req.user.role !== 'Manager') {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const lead = await Lead.findById(req.params.id);
@@ -1210,9 +1278,9 @@ router.patch('/:id/approve-poc/:pocId', auth, async (req, res) => {
         await logActivity({
             leadId: lead._id,
             type: 'POC Approved',
-            description: `POC "${poc.name}" for lead "${lead.company_name || lead.website_url}" was approved by Admin.`,
+            description: `POC "${poc.name}" for lead "${lead.company_name || lead.website_url}" was approved.`,
             userId: req.user.id,
-            userName: req.user.name || 'Admin'
+            userName: req.user.name
         });
 
         res.json({ message: 'Point of Contact approved successfully', lead });
@@ -1227,8 +1295,8 @@ router.patch('/:id/approve-poc/:pocId', auth, async (req, res) => {
 // @access  Private (Admin)
 router.patch('/:id/reject-poc/:pocId', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (req.user.role !== 'Admin' && req.user.role !== 'Manager') {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const lead = await Lead.findById(req.params.id);
