@@ -721,7 +721,8 @@ router.put('/:id', auth, async (req, res) => {
 
         const oldStage = oldLead?.stage;
         const oldAssignedBy = oldLead?.assignedBy?._id?.toString();
-        const oldPocCount = oldLead?.points_of_contact?.length || 0;
+        const originalPocs = oldLead.toObject().points_of_contact || [];
+        const oldPocCount = originalPocs.length;
 
         // Update POCs if provided
         if (points_of_contact) {
@@ -846,25 +847,60 @@ router.put('/:id', auth, async (req, res) => {
                     userName: actorName,
                     metadata: { newPocCount }
                 });
-            } else if (newPocCount === oldPocCount) {
+            }
+
+            // Determine which fields changed for each existing POC
+            const updatedPocs = [];
+            const oldPocsMap = new Map(originalPocs.map(p => [p._id.toString(), p]));
+            updatedLead.points_of_contact.forEach(poc => {
+                const oldPoc = oldPocsMap.get(poc._id.toString());
+                if (!oldPoc) return; // skip new POCs (added earlier)
+                const changedFields = [];
+                if ((poc.name || '') !== (oldPoc.name || '')) changedFields.push('name');
+                if ((poc.designation || '') !== (oldPoc.designation || '')) changedFields.push('designation');
+                if ((poc.phone || '') !== (oldPoc.phone || '')) changedFields.push('phone');
+                if ((poc.alternate_phone || '') !== (oldPoc.alternate_phone || '')) changedFields.push('alternate_phone');
+                if ((poc.email || '') !== (oldPoc.email || '')) changedFields.push('email');
+                if ((poc.linkedin_url || '') !== (oldPoc.linkedin_url || '')) changedFields.push('linkedin_url');
+                if ((poc.stage || '') !== (oldPoc.stage || '')) changedFields.push('stage');
+                if ((poc.approvalStatus || '') !== (oldPoc.approvalStatus || '')) changedFields.push('approvalStatus');
+                if (changedFields.length) {
+                    updatedPocs.push({ pocId: poc._id, pocName: poc.name, fields: changedFields });
+                }
+            });
+            
+            if (updatedPocs.length > 0) {
+                const descriptions = updatedPocs.map(up => `${up.pocName} (${up.fields.join(', ')})`);
+                const descriptionText = `Contact details updated for: ${descriptions.join('; ')}`;
+                
                 await logActivity({
                     leadId,
                     type: 'POC Updated',
-                    description: `Contact details updated.`,
+                    description: descriptionText,
                     userId: req.user.id,
-                    userName: actorName
+                    userName: actorName,
+                    metadata: { updatedPocs }
                 });
             }
         }
 
         // Log general lead info update
-        if (company_name || website_url || company_email || company_size || industry_name || linkedin_link) {
+        const changedLeadFields = [];
+        if (company_name !== undefined && (company_name || '') !== (oldLead.company_name || '')) changedLeadFields.push('Company Name');
+        if (website_url !== undefined && (normalizedUrl || '') !== (oldLead.website_url || '')) changedLeadFields.push('Website');
+        if (company_email !== undefined && (company_email || '') !== (oldLead.company_email || '')) changedLeadFields.push('Company Email');
+        if (company_size !== undefined && (company_size || '') !== (oldLead.company_size || '')) changedLeadFields.push('Company Size');
+        if (industry_name !== undefined && (industry_name || '') !== (oldLead.industry_name || '')) changedLeadFields.push('Industry');
+        if (linkedin_link !== undefined && (linkedin_link || '') !== (oldLead.linkedin_link || '')) changedLeadFields.push('LinkedIn URL');
+
+        if (changedLeadFields.length > 0) {
             await logActivity({
                 leadId,
                 type: 'Lead Updated',
-                description: `Lead information was updated.`,
+                description: `Company details updated: ${changedLeadFields.join(', ')}`,
                 userId: req.user.id,
-                userName: actorName
+                userName: actorName,
+                metadata: { changedLeadFields }
             });
         }
 
@@ -1063,6 +1099,15 @@ router.put('/:id/poc/:pocId', auth, async (req, res) => {
             return res.status(400).json({ message: 'Another contact with this phone or email already exists in this lead.' });
         }
 
+        const oldPoc = lead.points_of_contact[pocIndex];
+        const changedFields = [];
+        if (name !== oldPoc.name) changedFields.push('name');
+        if (designation !== oldPoc.designation) changedFields.push('designation');
+        if (phone !== oldPoc.phone) changedFields.push('phone');
+        if (email !== oldPoc.email) changedFields.push('email');
+        if (linkedin_url !== oldPoc.linkedin_url) changedFields.push('linkedin_url');
+        if (stage && stage !== oldPoc.stage) changedFields.push('stage');
+
         // Update POC
         lead.points_of_contact[pocIndex] = {
             ...lead.points_of_contact[pocIndex].toObject(),
@@ -1076,14 +1121,19 @@ router.put('/:id/poc/:pocId', auth, async (req, res) => {
 
         await lead.save();
 
+        let description = `Updated Point of Contact: ${name}`;
+        if (changedFields.length > 0) {
+            description = `Updated Point of Contact: ${name} (${changedFields.join(', ')})`;
+        }
+
         // Log activity
         await logActivity({
             leadId: lead._id,
             type: 'POC Updated',
-            description: `Updated Point of Contact: ${name}`,
+            description,
             userId: req.user.id,
             userName: req.user.name,
-            metadata: { pocId: req.params.pocId, name, designation }
+            metadata: { pocId: req.params.pocId, name, designation, changedFields }
         });
 
         res.json({ message: 'Contact updated successfully', poc: lead.points_of_contact[pocIndex] });
