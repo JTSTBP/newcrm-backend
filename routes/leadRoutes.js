@@ -1145,11 +1145,11 @@ router.put('/:id/poc/:pocId', auth, async (req, res) => {
 
 // @route   PATCH /api/leads/bulk/update
 // @desc    Bulk update lead fields
-// @access  Private (Admin)
+// @access  Private (Admin/Manager)
 router.patch('/bulk/update', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (!['Admin', 'Manager'].includes(req.user.role)) {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const { ids, isAllGlobal, filters, updates } = req.body;
@@ -1167,6 +1167,23 @@ router.patch('/bulk/update', auth, async (req, res) => {
             return res.status(400).json({ message: 'Please provide IDs or a global selection flag.' });
         }
 
+        if (req.user.role === 'Manager') {
+            const reporters = await User.find({ reporter: req.user.id }).select('_id');
+            const userIds = [req.user.id].concat(reporters.map(r => r._id.toString()));
+            query = {
+                $and: [
+                    query,
+                    {
+                        $or: [
+                            { assignedBy: { $in: userIds } },
+                            { createdBy: { $in: userIds } },
+                            { assignedTo: { $in: userIds } }
+                        ]
+                    }
+                ]
+            };
+        }
+
         const result = await Lead.updateMany(query, { $set: updates });
 
         res.json({ message: `Successfully updated ${result.modifiedCount} leads.` });
@@ -1178,11 +1195,11 @@ router.patch('/bulk/update', auth, async (req, res) => {
 
 // @route   POST /api/leads/bulk/delete
 // @desc    Bulk delete leads
-// @access  Private (Admin)
+// @access  Private (Admin/Manager)
 router.post('/bulk/delete', auth, async (req, res) => {
     try {
-        if (req.user.role !== 'Admin') {
-            return res.status(403).json({ message: 'Access denied. Admins only.' });
+        if (!['Admin', 'Manager'].includes(req.user.role)) {
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         const { ids, isAllGlobal, filters } = req.body;
@@ -1194,6 +1211,23 @@ router.post('/bulk/delete', auth, async (req, res) => {
             query = { _id: { $in: ids } };
         } else {
             return res.status(400).json({ message: 'Please provide IDs or a global selection flag.' });
+        }
+
+        if (req.user.role === 'Manager') {
+            const reporters = await User.find({ reporter: req.user.id }).select('_id');
+            const userIds = [req.user.id].concat(reporters.map(r => r._id.toString()));
+            query = {
+                $and: [
+                    query,
+                    {
+                        $or: [
+                            { assignedBy: { $in: userIds } },
+                            { createdBy: { $in: userIds } },
+                            { assignedTo: { $in: userIds } }
+                        ]
+                    }
+                ]
+            };
         }
 
         const result = await Lead.deleteMany(query);
