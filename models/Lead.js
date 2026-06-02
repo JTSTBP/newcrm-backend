@@ -42,7 +42,7 @@ const LeadSchema = new mongoose.Schema(
         company_email: { type: String },
         company_info: { type: String },
         company_size: { type: String },
-        website_url: { type: String, unique: true, sparse: true },
+        website_url: { type: String, sparse: true },
         status: {
             type: String,
             enum: ["incomplete", "approved", "rejected"],
@@ -87,6 +87,8 @@ const LeadSchema = new mongoose.Schema(
             ref: "users",
         }],
         remarks: [remarkSchema],
+        isDuplicate: { type: Boolean, default: false },
+        duplicateOf: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', default: null },
     },
     { timestamps: true }
 );

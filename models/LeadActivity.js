@@ -25,7 +25,12 @@ const LeadActivitySchema = new mongoose.Schema({
             'Task Reopened',
             'Task Deleted',
             'Remark Added',
-            'Bulk Upload'
+            'Bulk Upload',
+            'Lead Merged',
+            'Lead Approved',
+            'Lead Rejected',
+            'POC Approved',
+            'POC Rejected'
         ]
     },
     description: { type: String, required: true },

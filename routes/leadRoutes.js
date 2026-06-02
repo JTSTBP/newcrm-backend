@@ -154,22 +154,23 @@ router.get('/check', auth, async (req, res) => {
         }
 
         // Add ownership check for non-admins
+        let isOwner = true;
         if (req.user.role !== 'Admin') {
             let userIds = [req.user.id];
             if (req.user.role === 'Manager') {
                 const reporters = await User.find({ reporter: req.user.id }).select('_id');
                 userIds = userIds.concat(reporters.map(r => r._id.toString()));
             }
-            const isOwner = userIds.includes(lead.assignedBy?.toString()) ||
+            isOwner = userIds.includes(lead.assignedBy?.toString()) ||
                 userIds.includes(lead.createdBy?.toString()) ||
                 (lead.assignedTo && lead.assignedTo.some(id => userIds.includes(id.toString())));
-
-            if (!isOwner) {
-                return res.status(403).json({ message: 'Access denied. You do not have permission to add POCs to this lead.' });
-            }
         }
 
-        res.json({ id: lead._id, company_name: lead.company_name, status: lead.status });
+        if (!isOwner) {
+            return res.json({ id: lead._id, company_name: lead.company_name, website_url: lead.website_url, status: lead.status, isDuplicate: true });
+        }
+
+        res.json({ id: lead._id, company_name: lead.company_name, status: lead.status, isDuplicate: false });
     } catch (err) {
         console.error('Check lead error:', err);
         res.status(500).json({ message: 'Server Error' });
@@ -260,20 +261,27 @@ router.post('/', auth, async (req, res) => {
         }
 
         let normalizedUrl = undefined;
+        let isDuplicate = false;
+        let duplicateOf = null;
+
         if (website_url) {
             normalizedUrl = website_url.trim().toLowerCase();
             // Check if website already exists
             const existingLead = await Lead.findOne({ website_url: normalizedUrl });
             if (existingLead) {
-                return res.status(400).json({ message: 'A lead with this website already exists.' });
+                isDuplicate = true;
+                duplicateOf = existingLead._id;
+                leadStatus = 'incomplete';
             }
         }
 
-        if (company_name) {
+        if (company_name && !isDuplicate) {
             const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
             const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
             if (existingNameLead) {
-                return res.status(400).json({ message: 'A lead with this company name already exists.' });
+                isDuplicate = true;
+                duplicateOf = existingNameLead._id;
+                leadStatus = 'incomplete';
             }
         }
 
@@ -288,10 +296,12 @@ router.post('/', auth, async (req, res) => {
             createdBy: req.user.id,
             assignedTo: assignedTo || [],
             points_of_contact: processedPocs,
-            status: leadStatus || 'approved'
+            status: leadStatus || 'approved',
+            isDuplicate,
+            duplicateOf
         };
 
-        if (normalizedUrl) {
+        if (normalizedUrl && !isDuplicate) {
             leadData.website_url = normalizedUrl;
         }
 
@@ -1250,6 +1260,63 @@ router.patch('/:id/approve', auth, async (req, res) => {
 
         const lead = await Lead.findById(req.params.id);
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        if (lead.isDuplicate && lead.duplicateOf) {
+            // MERGE LOGIC
+            const originalLead = await Lead.findById(lead.duplicateOf);
+            if (!originalLead) {
+                return res.status(404).json({ message: 'Original lead no longer exists to merge with.' });
+            }
+
+            // 1. Process overwrites if requested
+            if (req.body.overwrites && typeof req.body.overwrites === 'object') {
+                const mergeableFields = [
+                    'company_name', 'company_email', 'company_size', 
+                    'website_url', 'industry_name', 'linkedin_link', 
+                    'lead_source', 'hiring_needs'
+                ];
+                mergeableFields.forEach(field => {
+                    if (req.body.overwrites[field] !== undefined) {
+                        originalLead[field] = req.body.overwrites[field];
+                    }
+                });
+            }
+
+            // 2. Add new POCs to original lead
+            const newPocs = lead.points_of_contact.map(poc => {
+                const pocObj = poc.toObject();
+                delete pocObj._id; // Remove duplicate ID to allow mongo to generate a new one
+                pocObj.approvalStatus = 'approved';
+                return pocObj;
+            });
+            originalLead.points_of_contact.push(...newPocs);
+
+            // 3. Add the BD who submitted this to assignedTo if not already there
+            const creatorId = lead.createdBy?.toString() || lead.assignedBy?.toString();
+            if (creatorId && (!originalLead.assignedTo || !originalLead.assignedTo.some(u => u.toString() === creatorId))) {
+                if (!originalLead.assignedTo) originalLead.assignedTo = [];
+                originalLead.assignedTo.push(creatorId);
+            }
+
+            // 4. Change lead stage to New when duplicate is merged
+            originalLead.stage = 'New';
+
+            await originalLead.save();
+
+            // 4. Delete the duplicate lead
+            await Lead.findByIdAndDelete(lead._id);
+
+            // Log activity
+            await logActivity({
+                leadId: originalLead._id,
+                type: 'Lead Merged',
+                description: `A duplicate submission was approved and merged into this lead. Added ${newPocs.length} new contact(s).`,
+                userId: req.user.id,
+                userName: req.user.name
+            });
+
+            return res.json({ message: 'Duplicate lead approved and merged successfully', lead: originalLead });
+        }
 
         // Enforce validation for approval (if lead is not approved yet)
         if (lead.status !== 'approved') {
