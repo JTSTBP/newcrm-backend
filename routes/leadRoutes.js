@@ -76,6 +76,8 @@ router.get('/', auth, async (req, res) => {
         // Default to approved leads (anything not marked incomplete or rejected) if no status filter is provided
         if (!req.query.status) {
             query.status = { $nin: ['incomplete', 'rejected'] };
+        } else {
+            query.status = req.query.status === 'approved' ? { $nin: ['incomplete', 'rejected'] } : req.query.status;
         }
 
         // Enforce user isolation for non-admins
@@ -501,11 +503,14 @@ router.get('/pocs', auth, async (req, res) => {
         const { leadStage, pocStage, assignedBy, startDate, endDate } = req.query;
 
         const pipeline = [];
+        let leadMatch = {};
 
-        // Lead Match conditions
-        let leadMatch = {
-            status: { $nin: ['incomplete', 'rejected'] }
-        };
+        // Apply status filter: default to approved leads if not provided
+        if (!req.query.status) {
+            leadMatch.status = { $nin: ['incomplete', 'rejected'] };
+        } else {
+            leadMatch.status = req.query.status === 'approved' ? { $nin: ['incomplete', 'rejected'] } : req.query.status;
+        }
 
         // Enforce user isolation for non-admins
         if (req.user.role !== 'Admin') {
