@@ -305,14 +305,51 @@ router.post('/', auth, async (req, res) => {
             leadData.website_url = normalizedUrl;
         }
 
-        const newLead = new Lead(leadData);
+        // If duplicate lead exists, merge new POCs into existing lead instead of creating a new lead
+        if (isDuplicate && duplicateOf) {
+            const existingLead = await Lead.findById(duplicateOf);
+            if (!existingLead) {
+                return res.status(404).json({ message: 'Duplicate lead not found.' });
+            }
+            // Merge points of contact
+            const existingPocs = existingLead.points_of_contact || [];
+            const mergedPocs = [...existingPocs, ...processedPocs];
+            // Validate uniqueness after merge
+            const mergeError = validatePOCs(mergedPocs);
+            if (mergeError) return res.status(400).json({ message: mergeError });
+            existingLead.points_of_contact = mergedPocs;
+            // Optionally update other fields if needed (e.g., company_email, size, etc.)
+            if (company_email) existingLead.company_email = company_email;
+            if (company_size) existingLead.company_size = company_size;
+            if (industry_name) existingLead.industry_name = industry_name;
+            if (linkedin_link) existingLead.linkedin_link = linkedin_link;
+            if (stage) existingLead.stage = stage;
+            if (assignedTo) existingLead.assignedTo = assignedTo;
+            // Save updated lead
+            await existingLead.save();
+            const populatedLead = await Lead.findById(existingLead._id)
+                .populate('assignedBy', 'name email')
+                .populate('createdBy', 'name email')
+                .populate('assignedTo', 'name email');
+            // Log activity for merge
+            await logActivity({
+                leadId: existingLead._id,
+                type: 'Lead Updated',
+                description: `Merged new POCs into existing lead "${company_name || existingLead.company_name}".`,
+                userId: req.user.id,
+                userName: req.user.name || 'Admin',
+                metadata: { mergedPocsCount: processedPocs.length }
+            });
+            return res.status(200).json(populatedLead);
+        }
 
+        // No duplicate, create new lead as usual
+        const newLead = new Lead(leadData);
         const lead = await newLead.save();
         const populatedLead = await Lead.findById(lead._id)
             .populate('assignedBy', 'name email')
             .populate('createdBy', 'name email')
             .populate('assignedTo', 'name email');
-
         // Log activity
         await logActivity({
             leadId: lead._id,
@@ -322,10 +359,128 @@ router.post('/', auth, async (req, res) => {
             userName: req.user.name || 'Admin',
             metadata: { company_name, website_url: normalizedUrl, stage: stage || 'New' }
         });
-
         res.status(201).json(populatedLead);
     } catch (err) {
         console.error('Create lead error:', err);
+        res.status(500).json({ message: 'Server Error', error: err.message });
+    }
+});
+
+// @route   POST /api/leads/bulk-upload
+// @desc    Bulk upload leads, merging POCs for existing companies
+// @access  Private (Admin)
+router.post('/bulk-upload', auth, async (req, res) => {
+    try {
+        const leadsArray = req.body.leads;
+        if (!Array.isArray(leadsArray)) {
+            return res.status(400).json({ message: 'Leads data should be an array.' });
+        }
+
+        const stats = { created: 0, updated: 0, failed: 0, errors: [] };
+
+        for (const leadInput of leadsArray) {
+            const {
+                company_name,
+                company_email,
+                website_url,
+                company_size,
+                industry_name,
+                linkedin_link,
+                stage,
+                assignedBy,
+                assignedTo,
+                points_of_contact,
+                status
+            } = leadInput;
+
+            if (!website_url && !company_name) {
+                stats.failed++;
+                stats.errors.push({ lead: leadInput, message: 'Missing website or company name.' });
+                continue;
+            }
+
+            const resolvedLeadStatus = (status && status !== 'incomplete') ? status : (req.user.role !== 'Admin' ? 'incomplete' : status);
+            const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
+            const processedPocs = (points_of_contact || []).map(poc => ({
+                ...poc,
+                approvalStatus: initialPocStatus
+            }));
+
+            // Duplicate detection
+            let duplicateLead = null;
+            if (website_url) {
+                const normalizedUrl = website_url.trim().toLowerCase();
+                duplicateLead = await Lead.findOne({ website_url: normalizedUrl });
+            }
+            if (!duplicateLead && company_name) {
+                const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\\]{}]/g, '\\$&');
+                duplicateLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
+            }
+
+            try {
+                if (duplicateLead) {
+                    const existingPocs = duplicateLead.points_of_contact || [];
+                    const mergedPocs = [...existingPocs, ...processedPocs];
+                    const mergeError = validatePOCs(mergedPocs);
+                    if (mergeError) throw new Error(mergeError);
+
+                    duplicateLead.points_of_contact = mergedPocs;
+                    if (company_email) duplicateLead.company_email = company_email;
+                    if (company_size) duplicateLead.company_size = company_size;
+                    if (industry_name) duplicateLead.industry_name = industry_name;
+                    if (linkedin_link) duplicateLead.linkedin_link = linkedin_link;
+                    if (stage) duplicateLead.stage = stage;
+                    if (assignedTo) duplicateLead.assignedTo = assignedTo;
+
+                    await duplicateLead.save();
+
+                    await logActivity({
+                        leadId: duplicateLead._id,
+                        type: 'Lead Updated',
+                        description: `Bulk upload merged POCs into existing lead "${duplicateLead.company_name}".`,
+                        userId: req.user.id,
+                        userName: req.user.name || 'Admin',
+                        metadata: { mergedPocsCount: processedPocs.length }
+                    });
+                    stats.updated++;
+                } else {
+                    const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
+                    const leadData = {
+                        company_name,
+                        company_email,
+                        company_size,
+                        industry_name,
+                        linkedin_link,
+                        stage: stage || 'New',
+                        assignedBy: finalAssignedBy,
+                        createdBy: req.user.id,
+                        assignedTo: assignedTo || [],
+                        points_of_contact: processedPocs,
+                        status: resolvedLeadStatus || 'approved',
+                        website_url: website_url ? website_url.trim().toLowerCase() : undefined
+                    };
+                    const newLead = new Lead(leadData);
+                    await newLead.save();
+
+                    await logActivity({
+                        leadId: newLead._id,
+                        type: 'Lead Created',
+                        description: `Lead "${company_name}" created via bulk upload.`,
+                        userId: req.user.id,
+                        userName: req.user.name || 'Admin',
+                        metadata: { company_name, website_url: leadData.website_url, stage: leadData.stage }
+                    });
+                    stats.created++;
+                }
+            } catch (innerErr) {
+                stats.failed++;
+                stats.errors.push({ lead: leadInput, message: innerErr.message });
+            }
+        }
+
+        res.json({ message: 'Bulk upload processed.', stats });
+    } catch (err) {
+        console.error('Bulk upload error:', err);
         res.status(500).json({ message: 'Server Error', error: err.message });
     }
 });
