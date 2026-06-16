@@ -8,6 +8,69 @@ const CallActivity = require('../models/CallActivity');
 const LeadActivity = require('../models/LeadActivity');
 const Task = require('../models/Task');
 
+// Helper to calculate daily BD performance (Date, BD Executive name, Target (5), Achieved, Yet Achieved, Onboarded)
+const getDailyBDPerformance = async (leadQuery) => {
+    return await Lead.aggregate([
+        { $match: leadQuery },
+        {
+            $group: {
+                _id: {
+                    date: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "+05:30" } },
+                    assignedBy: "$assignedBy"
+                },
+                achieved: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ["$stage", "Proposal Sent"] },
+                            1,
+                            0
+                        ]
+                    }
+                },
+                onboarded: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ["$stage", "Onboarded"] },
+                            1,
+                            0
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            $lookup: {
+                from: "users",
+                localField: "_id.assignedBy",
+                foreignField: "_id",
+                as: "agentInfo"
+            }
+        },
+        {
+            $unwind: {
+                path: "$agentInfo",
+                preserveNullAndEmptyArrays: true
+            }
+        },
+        {
+            $project: {
+                _id: 0,
+                date: "$_id.date",
+                agentId: "$_id.assignedBy",
+                agentName: { $ifNull: ["$agentInfo.name", "Unknown"] },
+                achieved: 1,
+                onboarded: 1,
+                target: { $literal: 5 },
+                yetAchieved: {
+                    $subtract: [5, "$achieved"]
+                }
+            }
+        },
+        { $sort: { date: -1, agentName: 1 } }
+    ]);
+};
+
+
 // @route   GET /api/dashboard/admin
 // @desc    Get admin dashboard statistics
 // @access  Private/Admin
@@ -241,7 +304,8 @@ router.get('/admin-reports', auth, async (req, res) => {
             monthlyTimeline,
             agentPerformance,
             summaryStats,
-            callOutcomes
+            callOutcomes,
+            dailyBDPerformance: await getDailyBDPerformance(leadQuery)
         });
 
     } catch (err) {
@@ -539,7 +603,8 @@ router.get('/bd-reports', auth, async (req, res) => {
             myLeadsByStage,
             myLeadsByIndustry,
             myMonthlyTimeline,
-            myCallOutcomes
+            myCallOutcomes,
+            dailyBDPerformance: await getDailyBDPerformance(leadQuery)
         });
 
     } catch (err) {
@@ -904,7 +969,8 @@ router.get('/manager-reports', auth, async (req, res) => {
             summaryStats,
             agentPerformance,
             reportees: reporteesList,
-            managerInfo: manager ? { name: manager.name, role: manager.role } : null
+            managerInfo: manager ? { name: manager.name, role: manager.role } : null,
+            dailyBDPerformance: await getDailyBDPerformance(leadQuery)
         });
     } catch (err) {
         console.error(err.message);
