@@ -24,6 +24,7 @@ const PointOfContactSchema = new mongoose.Schema({
     alternate_phone: { type: String, default: "" },
     email: { type: String },
     linkedin_url: { type: String },
+    requirementId: { type: String },
     stage: {
         type: String,
         enum: ["New", "Contacted", "Busy", "No Answer", "Wrong Number"],

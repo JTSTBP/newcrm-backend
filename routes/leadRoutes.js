@@ -191,11 +191,6 @@ const validatePOCs = (pocs) => {
             phones.add(p);
         }
         // Alternate phone uniqueness
-        if (poc.alternate_phone && poc.alternate_phone.trim()) {
-            const ap = poc.alternate_phone.trim();
-            if (phones.has(ap)) return `Duplicate phone number found: ${ap} (used as alternate number)`;
-            phones.add(ap);
-        }
         // Email uniqueness
         if (poc.email && poc.email.trim()) {
             const e = poc.email.trim();
@@ -231,9 +226,28 @@ router.post('/', auth, async (req, res) => {
 
         if (company_name) company_name = company_name.trim();
 
-        // POC uniqueness check
-        const pocError = validatePOCs(points_of_contact || []);
-        if (pocError) return res.status(400).json({ message: pocError });
+        // Check for existing lead by website or company name to determine if this is a duplicate
+        let isDuplicate = false;
+        let duplicateOf = null;
+        if (website_url) {
+            const normalizedUrl = website_url.trim().toLowerCase();
+            const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+            if (existingLead) {
+                isDuplicate = true;
+                duplicateOf = existingLead._id;
+                leadStatus = 'incomplete';
+            }
+        }
+        if (!isDuplicate && company_name) {
+            const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\\]{}]/g, '\\$&');
+            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
+            if (existingNameLead) {
+                isDuplicate = true;
+                duplicateOf = existingNameLead._id;
+                leadStatus = 'incomplete';
+            }
+        }
+        
 
         // If lead starts as incomplete, all pOCS should be pending
         // Enforce 'incomplete' status for non-admins if not specified
@@ -263,8 +277,6 @@ router.post('/', auth, async (req, res) => {
         }
 
         let normalizedUrl = undefined;
-        let isDuplicate = false;
-        let duplicateOf = null;
 
         if (website_url) {
             normalizedUrl = website_url.trim().toLowerCase();
@@ -364,125 +376,6 @@ router.post('/', auth, async (req, res) => {
         res.status(201).json(populatedLead);
     } catch (err) {
         console.error('Create lead error:', err);
-        res.status(500).json({ message: 'Server Error', error: err.message });
-    }
-});
-
-// @route   POST /api/leads/bulk-upload
-// @desc    Bulk upload leads, merging POCs for existing companies
-// @access  Private (Admin)
-router.post('/bulk-upload', auth, async (req, res) => {
-    try {
-        const leadsArray = req.body.leads;
-        if (!Array.isArray(leadsArray)) {
-            return res.status(400).json({ message: 'Leads data should be an array.' });
-        }
-
-        const stats = { created: 0, updated: 0, failed: 0, errors: [] };
-
-        for (const leadInput of leadsArray) {
-            const {
-                company_name,
-                company_email,
-                website_url,
-                company_size,
-                industry_name,
-                linkedin_link,
-                stage,
-                assignedBy,
-                assignedTo,
-                points_of_contact,
-                status
-            } = leadInput;
-
-            if (!website_url && !company_name) {
-                stats.failed++;
-                stats.errors.push({ lead: leadInput, message: 'Missing website or company name.' });
-                continue;
-            }
-
-            const resolvedLeadStatus = (status && status !== 'incomplete') ? status : (req.user.role !== 'Admin' ? 'incomplete' : status);
-            const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
-            const processedPocs = (points_of_contact || []).map(poc => ({
-                ...poc,
-                approvalStatus: initialPocStatus
-            }));
-
-            // Duplicate detection
-            let duplicateLead = null;
-            if (website_url) {
-                const normalizedUrl = website_url.trim().toLowerCase();
-                duplicateLead = await Lead.findOne({ website_url: normalizedUrl });
-            }
-            if (!duplicateLead && company_name) {
-                const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\\]{}]/g, '\\$&');
-                duplicateLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
-            }
-
-            try {
-                if (duplicateLead) {
-                    const existingPocs = duplicateLead.points_of_contact || [];
-                    const mergedPocs = [...existingPocs, ...processedPocs];
-                    const mergeError = validatePOCs(mergedPocs);
-                    if (mergeError) throw new Error(mergeError);
-
-                    duplicateLead.points_of_contact = mergedPocs;
-                    if (company_email) duplicateLead.company_email = company_email;
-                    if (company_size) duplicateLead.company_size = company_size;
-                    if (industry_name) duplicateLead.industry_name = industry_name;
-                    if (linkedin_link) duplicateLead.linkedin_link = linkedin_link;
-                    if (stage) duplicateLead.stage = stage;
-                    if (assignedTo) duplicateLead.assignedTo = assignedTo;
-
-                    await duplicateLead.save();
-
-                    await logActivity({
-                        leadId: duplicateLead._id,
-                        type: 'Lead Updated',
-                        description: `Bulk upload merged POCs into existing lead "${duplicateLead.company_name}".`,
-                        userId: req.user.id,
-                        userName: req.user.name || 'Admin',
-                        metadata: { mergedPocsCount: processedPocs.length }
-                    });
-                    stats.updated++;
-                } else {
-                    const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
-                    const leadData = {
-                        company_name,
-                        company_email,
-                        company_size,
-                        industry_name,
-                        linkedin_link,
-                        stage: stage || 'New',
-                        assignedBy: finalAssignedBy,
-                        createdBy: req.user.id,
-                        assignedTo: assignedTo || [],
-                        points_of_contact: processedPocs,
-                        status: resolvedLeadStatus || 'approved',
-                        website_url: website_url ? website_url.trim().toLowerCase() : undefined
-                    };
-                    const newLead = new Lead(leadData);
-                    await newLead.save();
-
-                    await logActivity({
-                        leadId: newLead._id,
-                        type: 'Lead Created',
-                        description: `Lead "${company_name}" created via bulk upload.`,
-                        userId: req.user.id,
-                        userName: req.user.name || 'Admin',
-                        metadata: { company_name, website_url: leadData.website_url, stage: leadData.stage }
-                    });
-                    stats.created++;
-                }
-            } catch (innerErr) {
-                stats.failed++;
-                stats.errors.push({ lead: leadInput, message: innerErr.message });
-            }
-        }
-
-        res.json({ message: 'Bulk upload processed.', stats });
-    } catch (err) {
-        console.error('Bulk upload error:', err);
         res.status(500).json({ message: 'Server Error', error: err.message });
     }
 });
@@ -1634,6 +1527,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
         if (req.user.role !== 'Admin') {
             return res.status(403).json({ message: 'Access denied. Admins only.' });
         }
+        
 
         const { leads } = req.body;
         if (!leads || !Array.isArray(leads)) {
@@ -1676,14 +1570,18 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     assignedBy,
                     points_of_contact
                 } = row;
+                 console.log("assigned_by_email",assigned_by_email)
+                console.log("assignedBy",assignedBy)
 
                 // Basic validation
                 if (!company_name && !website_url) {
                     throw new Error(`Row ${i + 1}: Either Company name or Website URL is mandatory.`);
                 }
+               
 
                 // Determine final assigned_by user ID
                 let finalAssignedBy = req.user.id;
+               
                 if (assigned_by_email) {
                     const normalizedEmail = assigned_by_email.toLowerCase().trim();
                     if (emailToUserIdMap[normalizedEmail]) {
@@ -1777,6 +1675,7 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     stats.updated++;
                 } else {
                     // Create new lead
+                    console.log(leadData,"leadData")
                     const newLead = new Lead(leadData);
                     await newLead.save();
                     stats.created++;
