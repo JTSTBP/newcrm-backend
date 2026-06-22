@@ -11,7 +11,7 @@ const mongoose = require('mongoose');
 
 // Helper to build lead query based on filters
 const buildLeadQuery = (params) => {
-    const { search, leadStage, assignedBy, pocStage, startDate, endDate, status } = params;
+    const { search, leadStage, assignedBy, pocStage, startDate, endDate, status, isDuplicate } = params;
     let query = {};
 
     if (search) {
@@ -40,16 +40,14 @@ const buildLeadQuery = (params) => {
         }
     }
 
+    if (isDuplicate !== undefined) {
+        query.isDuplicate = isDuplicate === 'true';
+    }
+
     if (status === 'approved') {
         query.status = { $nin: ['incomplete', 'rejected'] };
     } else if (status === 'incomplete') {
-        query.$and = query.$and || [];
-        query.$and.push({
-            $or: [
-                { status: { $in: ['incomplete', 'rejected'] } },
-                { 'points_of_contact.approvalStatus': { $in: ['pending', 'rejected'] } }
-            ]
-        });
+        query.status = 'incomplete';
     } else if (status) {
         query.status = status;
     }
@@ -376,6 +374,143 @@ router.post('/', auth, async (req, res) => {
         res.status(201).json(populatedLead);
     } catch (err) {
         console.error('Create lead error:', err);
+        res.status(500).json({ message: 'Server Error', error: err.message });
+    }
+});
+
+// @route   GET /api/leads/approval-pocs
+// @desc    Get paginated pending or rejected POCs for approval flow
+// @access  Private (Admin, Manager, BD Executive)
+router.get('/approval-pocs', auth, async (req, res) => {
+    try {
+        if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
+            return res.status(403).json({ message: 'Access denied.' });
+        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+        const search = req.query.search || '';
+        const approvalStatus = req.query.approvalStatus || 'pending';
+
+        const pipeline = [];
+
+        // Filter and unwind points_of_contact
+        pipeline.push(
+            { $unwind: "$points_of_contact" },
+            { $match: { "points_of_contact.approvalStatus": approvalStatus } }
+        );
+
+        // Enforce user isolation for non-admins
+        if (req.user.role !== 'Admin') {
+            let userIds = [req.user.id];
+            if (req.user.role === 'Manager') {
+                const reporters = await User.find({ reporter: req.user.id }).select('_id');
+                userIds = userIds.concat(reporters.map(r => r._id.toString()));
+            }
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { assignedBy: { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) } },
+                        { createdBy: { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) } },
+                        { assignedTo: { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) } }
+                    ]
+                }
+            });
+        }
+
+        // Apply search filter (search on company name, website, or POC name/email/phone)
+        if (search) {
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { company_name: { $regex: search, $options: 'i' } },
+                        { website_url: { $regex: search, $options: 'i' } },
+                        { "points_of_contact.name": { $regex: search, $options: 'i' } },
+                        { "points_of_contact.email": { $regex: search, $options: 'i' } },
+                        { "points_of_contact.phone": { $regex: search, $options: 'i' } }
+                    ]
+                }
+            });
+        }
+
+        // Project/Format the fields we need, including populate-like lookups for assignedTo and assignedBy
+        pipeline.push(
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "assignedBy",
+                    foreignField: "_id",
+                    as: "assignedByPopulated"
+                }
+            },
+            { $unwind: { path: "$assignedByPopulated", preserveNullAndEmptyArrays: true } },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "assignedTo",
+                    foreignField: "_id",
+                    as: "assignedToPopulated"
+                }
+            }
+        );
+
+        // Use $facet for pagination
+        pipeline.push({
+            $facet: {
+                metadata: [{ $count: "total" }],
+                data: [
+                    { $sort: { createdAt: -1 } }, // sort by Lead creation date
+                    { $skip: skip },
+                    { $limit: limit },
+                    {
+                        $project: {
+                            _id: "$points_of_contact._id",
+                            name: "$points_of_contact.name",
+                            phone: "$points_of_contact.phone",
+                            email: "$points_of_contact.email",
+                            designation: "$points_of_contact.designation",
+                            approvalStatus: "$points_of_contact.approvalStatus",
+                            lead: {
+                                _id: "$_id",
+                                company_name: "$company_name",
+                                website_url: "$website_url",
+                                status: "$status",
+                                isDuplicate: "$isDuplicate",
+                                createdAt: "$createdAt",
+                                assignedBy: {
+                                    _id: "$assignedByPopulated._id",
+                                    name: "$assignedByPopulated.name"
+                                },
+                                assignedTo: {
+                                    $map: {
+                                        input: "$assignedToPopulated",
+                                        as: "u",
+                                        in: {
+                                            _id: "$$u._id",
+                                            name: "$$u.name"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        const result = await Lead.aggregate(pipeline);
+        const total = result[0]?.metadata[0]?.total || 0;
+        const pocs = result[0]?.data || [];
+
+        res.json({
+            pocs,
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            totalPocs: total
+        });
+    } catch (err) {
+        console.error('Fetch approval POCs error:', err);
         res.status(500).json({ message: 'Server Error', error: err.message });
     }
 });
