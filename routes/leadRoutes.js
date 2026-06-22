@@ -2018,10 +2018,10 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     existingLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
                 }
 
-                if (company_name) {
+                if (!existingLead && company_name) {
                     const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^${company_name.trim()}$`, 'i') });
-                    if (existingNameLead && (!existingLead || existingLead._id.toString() !== existingNameLead._id.toString())) {
-                        throw new Error(`Row ${i + 1}: A lead with company name "${company_name}" already exists.`);
+                    if (existingNameLead) {
+                        existingLead = existingNameLead; // merge into existing lead
                     }
                 }
 
@@ -2044,7 +2044,11 @@ router.post('/bulk-upload', auth, async (req, res) => {
                                 (newPoc.email && ep.email === newPoc.email)
                             );
                             if (!isDuplicate) {
-                                existingPocs.push({ ...newPoc, approvalStatus: 'approved' });
+                                if (!newPoc.name || !newPoc.phone || !newPoc.email) {
+                                    existingPocs.push({ ...newPoc, approvalStatus: 'pending' });
+                                } else {
+                                    existingPocs.push({ ...newPoc, approvalStatus: 'approved' });
+                                }
                             } else {
                                 // Optionally update existing POC details if needed
                                 const index = existingPocs.findIndex(ep =>
@@ -2065,12 +2069,15 @@ router.post('/bulk-upload', auth, async (req, res) => {
                     await existingLead.save();
                     stats.updated++;
                 } else {
-                    // Create new lead
-                    console.log(leadData,"leadData")
+                    // Determine status for new lead based on mandatory fields
+                    if (!leadData.company_name || !leadData.website_url || (leadData.points_of_contact && leadData.points_of_contact.length === 0)) {
+                        leadData.status = 'incomplete';
+                    } else {
+                        leadData.status = leadData.status || 'approved';
+                    }
                     const newLead = new Lead(leadData);
                     await newLead.save();
-                    stats.created++;
-                }
+                    stats.created++;                }
             } catch (err) {
                 stats.failed++;
                 stats.errors.push(err.message);
