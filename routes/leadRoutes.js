@@ -202,6 +202,183 @@ const validatePOCs = (pocs) => {
 // @route   POST /api/leads
 // @desc    Create a new lead
 // @access  Private (Admin)
+// router.post('/', auth, async (req, res) => {
+//     try {
+//         if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
+//             return res.status(403).json({ message: 'Access denied.' });
+//         }
+
+//         let {
+//             company_name,
+//             company_email,
+//             website_url,
+//             company_size,
+//             industry_name,
+//             linkedin_link,
+//             stage,
+//             assignedBy,
+//             assignedTo,
+//             points_of_contact,
+//             status
+//         } = req.body;
+
+//         if (company_name) company_name = company_name.trim();
+
+//         // Check for existing lead by website or company name to determine if this is a duplicate
+//         let isDuplicate = false;
+//         let duplicateOf = null;
+//         if (website_url) {
+//             const normalizedUrl = website_url.trim().toLowerCase();
+//             const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+//             if (existingLead) {
+//                 isDuplicate = true;
+//                 duplicateOf = existingLead._id;
+//                 leadStatus = 'incomplete';
+//             }
+//         }
+//         if (!isDuplicate && company_name) {
+//             const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\\]{}]/g, '\\$&');
+//             const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
+//             if (existingNameLead) {
+//                 isDuplicate = true;
+//                 duplicateOf = existingNameLead._id;
+//                 leadStatus = 'incomplete';
+//             }
+//         }
+        
+
+//         // If lead starts as incomplete, all pOCS should be pending
+//         // Enforce 'incomplete' status for non-admins if not specified
+//         let leadStatus = status;
+//         if (req.user.role !== 'Admin' && !status) {
+//             leadStatus = 'incomplete';
+//         }
+
+//         // POCs are auto-approved if the lead being created is approved (e.g. Admin or BD from main tab)
+//         // POCs are pending if the lead is incomplete (e.g. BD using the pending leads flow)
+//         const resolvedLeadStatus = leadStatus || 'approved';
+//         const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
+//         const processedPocs = (points_of_contact || []).map(poc => ({
+//             ...poc,
+//             approvalStatus: initialPocStatus,
+//             createdBy: req.user.id
+//         }));
+
+//         const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
+
+//         // Basic validation
+//         if (!website_url && !company_name) {
+//             return res.status(400).json({ message: 'Please provide either a Website URL or a Company Name.' });
+//         }
+
+//         if (status !== 'incomplete' && !company_name) {
+//             return res.status(400).json({ message: 'Company name is required for approved leads.' });
+//         }
+
+//         let normalizedUrl = undefined;
+
+//         if (website_url) {
+//             normalizedUrl = website_url.trim().toLowerCase();
+//             // Check if website already exists
+//             const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+//             if (existingLead) {
+//                 isDuplicate = true;
+//                 duplicateOf = existingLead._id;
+//                 leadStatus = 'incomplete';
+//             }
+//         }
+
+//         if (company_name && !isDuplicate) {
+//             const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+//             const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
+//             if (existingNameLead) {
+//                 isDuplicate = true;
+//                 duplicateOf = existingNameLead._id;
+//                 leadStatus = 'incomplete';
+//             }
+//         }
+
+//         const leadData = {
+//             company_name,
+//             company_email,
+//             company_size,
+//             industry_name,
+//             linkedin_link,
+//             stage: stage || 'New',
+//             assignedBy: finalAssignedBy,
+//             createdBy: req.user.id,
+//             assignedTo: assignedTo || [],
+//             points_of_contact: processedPocs,
+//             status: leadStatus || 'approved',
+//             isDuplicate,
+//             duplicateOf
+//         };
+
+//         if (normalizedUrl && !isDuplicate) {
+//             leadData.website_url = normalizedUrl;
+//         }
+
+//         // If duplicate lead exists, merge new POCs into existing lead instead of creating a new lead
+//         if (isDuplicate && duplicateOf) {
+//             const existingLead = await Lead.findById(duplicateOf);
+//             if (!existingLead) {
+//                 return res.status(404).json({ message: 'Duplicate lead not found.' });
+//             }
+//             // Merge points of contact
+//             const existingPocs = existingLead.points_of_contact || [];
+//             const mergedPocs = [...existingPocs, ...processedPocs];
+//             // Validate uniqueness after merge
+//             const mergeError = validatePOCs(mergedPocs);
+//             if (mergeError) return res.status(400).json({ message: mergeError });
+//             existingLead.points_of_contact = mergedPocs;
+//             // Optionally update other fields if needed (e.g., company_email, size, etc.)
+//             if (company_email) existingLead.company_email = company_email;
+//             if (company_size) existingLead.company_size = company_size;
+//             if (industry_name) existingLead.industry_name = industry_name;
+//             if (linkedin_link) existingLead.linkedin_link = linkedin_link;
+//             if (stage) existingLead.stage = stage;
+//             if (assignedTo) existingLead.assignedTo = assignedTo;
+//             // Save updated lead
+//             await existingLead.save();
+//             const populatedLead = await Lead.findById(existingLead._id)
+//                 .populate('assignedBy', 'name email')
+//                 .populate('createdBy', 'name email')
+//                 .populate('assignedTo', 'name email');
+//             // Log activity for merge
+//             await logActivity({
+//                 leadId: existingLead._id,
+//                 type: 'Lead Updated',
+//                 description: `Merged new POCs into existing lead "${company_name || existingLead.company_name}".`,
+//                 userId: req.user.id,
+//                 userName: req.user.name || 'Admin',
+//                 metadata: { mergedPocsCount: processedPocs.length }
+//             });
+//             return res.status(200).json(populatedLead);
+//         }
+
+//         // No duplicate, create new lead as usual
+//         const newLead = new Lead(leadData);
+//         const lead = await newLead.save();
+//         const populatedLead = await Lead.findById(lead._id)
+//             .populate('assignedBy', 'name email')
+//             .populate('createdBy', 'name email')
+//             .populate('assignedTo', 'name email');
+//         // Log activity
+//         await logActivity({
+//             leadId: lead._id,
+//             type: 'Lead Created',
+//             description: `Lead "${company_name}" was created.`,
+//             userId: req.user.id,
+//             userName: req.user.name || 'Admin',
+//             metadata: { company_name, website_url: normalizedUrl, stage: stage || 'New' }
+//         });
+//         res.status(201).json(populatedLead);
+//     } catch (err) {
+//         console.error('Create lead error:', err);
+//         res.status(500).json({ message: 'Server Error', error: err.message });
+//     }
+// });
+
 router.post('/', auth, async (req, res) => {
     try {
         if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
@@ -224,79 +401,84 @@ router.post('/', auth, async (req, res) => {
 
         if (company_name) company_name = company_name.trim();
 
-        // Check for existing lead by website or company name to determine if this is a duplicate
+        // Basic validation
+        if (!website_url && !company_name) {
+            return res.status(400).json({
+                message: 'Please provide either a Website URL or a Company Name.'
+            });
+        }
+
+        if (status !== 'incomplete' && !company_name) {
+            return res.status(400).json({
+                message: 'Company name is required for approved leads.'
+            });
+        }
+
+        // Initialize lead status
+        let leadStatus = status;
+
+        if (req.user.role !== 'Admin' && !status) {
+            leadStatus = 'incomplete';
+        }
+
         let isDuplicate = false;
         let duplicateOf = null;
+        let normalizedUrl;
+
+        // Check duplicate by website
         if (website_url) {
-            const normalizedUrl = website_url.trim().toLowerCase();
-            const existingLead = await Lead.findOne({ website_url: normalizedUrl });
+            normalizedUrl = website_url.trim().toLowerCase();
+
+            const existingLead = await Lead.findOne({
+                website_url: normalizedUrl
+            });
+
             if (existingLead) {
                 isDuplicate = true;
                 duplicateOf = existingLead._id;
                 leadStatus = 'incomplete';
             }
         }
+
+        // Check duplicate by company name
         if (!isDuplicate && company_name) {
-            const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\\]{}]/g, '\\$&');
-            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
+            const escapedName = company_name.replace(
+                /[-\/\\^$*+?.()|[\]{}]/g,
+                '\\$&'
+            );
+
+            const existingNameLead = await Lead.findOne({
+                company_name: new RegExp(
+                    `^\\s*${escapedName}\\s*$`,
+                    'i'
+                )
+            });
+
             if (existingNameLead) {
                 isDuplicate = true;
                 duplicateOf = existingNameLead._id;
                 leadStatus = 'incomplete';
             }
         }
-        
 
-        // If lead starts as incomplete, all pOCS should be pending
-        // Enforce 'incomplete' status for non-admins if not specified
-        let leadStatus = status;
-        if (req.user.role !== 'Admin' && !status) {
-            leadStatus = 'incomplete';
-        }
-
-        // POCs are auto-approved if the lead being created is approved (e.g. Admin or BD from main tab)
-        // POCs are pending if the lead is incomplete (e.g. BD using the pending leads flow)
+        // Process POCs after final lead status is determined
         const resolvedLeadStatus = leadStatus || 'approved';
-        const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
-        const processedPocs = (points_of_contact || []).map(poc => ({
+
+        const initialPocStatus =
+            resolvedLeadStatus === 'incomplete'
+                ? 'pending'
+                : 'approved';
+
+        const processedPocs = (points_of_contact || []).map((poc) => ({
             ...poc,
             approvalStatus: initialPocStatus,
             createdBy: req.user.id
         }));
 
-        const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
-
-        // Basic validation
-        if (!website_url && !company_name) {
-            return res.status(400).json({ message: 'Please provide either a Website URL or a Company Name.' });
-        }
-
-        if (status !== 'incomplete' && !company_name) {
-            return res.status(400).json({ message: 'Company name is required for approved leads.' });
-        }
-
-        let normalizedUrl = undefined;
-
-        if (website_url) {
-            normalizedUrl = website_url.trim().toLowerCase();
-            // Check if website already exists
-            const existingLead = await Lead.findOne({ website_url: normalizedUrl });
-            if (existingLead) {
-                isDuplicate = true;
-                duplicateOf = existingLead._id;
-                leadStatus = 'incomplete';
-            }
-        }
-
-        if (company_name && !isDuplicate) {
-            const escapedName = company_name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-            const existingNameLead = await Lead.findOne({ company_name: new RegExp(`^\\s*${escapedName}\\s*$`, 'i') });
-            if (existingNameLead) {
-                isDuplicate = true;
-                duplicateOf = existingNameLead._id;
-                leadStatus = 'incomplete';
-            }
-        }
+        const finalAssignedBy =
+            req.user.role === 'Admin' && assignedBy
+                ? assignedBy
+                : req.user.id;
 
         const leadData = {
             company_name,
@@ -309,7 +491,7 @@ router.post('/', auth, async (req, res) => {
             createdBy: req.user.id,
             assignedTo: assignedTo || [],
             points_of_contact: processedPocs,
-            status: leadStatus || 'approved',
+            status: resolvedLeadStatus,
             isDuplicate,
             duplicateOf
         };
@@ -318,64 +500,106 @@ router.post('/', auth, async (req, res) => {
             leadData.website_url = normalizedUrl;
         }
 
-        // If duplicate lead exists, merge new POCs into existing lead instead of creating a new lead
+        // Merge into existing lead if duplicate found
         if (isDuplicate && duplicateOf) {
             const existingLead = await Lead.findById(duplicateOf);
+
             if (!existingLead) {
-                return res.status(404).json({ message: 'Duplicate lead not found.' });
+                return res.status(404).json({
+                    message: 'Duplicate lead not found.'
+                });
             }
-            // Merge points of contact
-            const existingPocs = existingLead.points_of_contact || [];
-            const mergedPocs = [...existingPocs, ...processedPocs];
-            // Validate uniqueness after merge
+
+            const existingPocs =
+                existingLead.points_of_contact || [];
+
+            const mergedPocs = [
+                ...existingPocs,
+                ...processedPocs
+            ];
+
             const mergeError = validatePOCs(mergedPocs);
-            if (mergeError) return res.status(400).json({ message: mergeError });
+
+            if (mergeError) {
+                return res.status(400).json({
+                    message: mergeError
+                });
+            }
+
             existingLead.points_of_contact = mergedPocs;
-            // Optionally update other fields if needed (e.g., company_email, size, etc.)
-            if (company_email) existingLead.company_email = company_email;
-            if (company_size) existingLead.company_size = company_size;
-            if (industry_name) existingLead.industry_name = industry_name;
-            if (linkedin_link) existingLead.linkedin_link = linkedin_link;
-            if (stage) existingLead.stage = stage;
-            if (assignedTo) existingLead.assignedTo = assignedTo;
-            // Save updated lead
+
+            if (company_email)
+                existingLead.company_email = company_email;
+
+            if (company_size)
+                existingLead.company_size = company_size;
+
+            if (industry_name)
+                existingLead.industry_name = industry_name;
+
+            if (linkedin_link)
+                existingLead.linkedin_link = linkedin_link;
+
+            if (stage)
+                existingLead.stage = stage;
+
+            if (Array.isArray(assignedTo)) {
+                existingLead.assignedTo = assignedTo;
+            }
+
             await existingLead.save();
-            const populatedLead = await Lead.findById(existingLead._id)
+
+            const populatedLead = await Lead.findById(
+                existingLead._id
+            )
                 .populate('assignedBy', 'name email')
                 .populate('createdBy', 'name email')
                 .populate('assignedTo', 'name email');
-            // Log activity for merge
+
             await logActivity({
                 leadId: existingLead._id,
                 type: 'Lead Updated',
                 description: `Merged new POCs into existing lead "${company_name || existingLead.company_name}".`,
                 userId: req.user.id,
                 userName: req.user.name || 'Admin',
-                metadata: { mergedPocsCount: processedPocs.length }
+                metadata: {
+                    mergedPocsCount: processedPocs.length
+                }
             });
+
             return res.status(200).json(populatedLead);
         }
 
-        // No duplicate, create new lead as usual
-        const newLead = new Lead(leadData);
-        const lead = await newLead.save();
+        // Create new lead
+        const lead = await new Lead(leadData).save();
+
         const populatedLead = await Lead.findById(lead._id)
             .populate('assignedBy', 'name email')
             .populate('createdBy', 'name email')
             .populate('assignedTo', 'name email');
-        // Log activity
+
         await logActivity({
             leadId: lead._id,
             type: 'Lead Created',
             description: `Lead "${company_name}" was created.`,
             userId: req.user.id,
             userName: req.user.name || 'Admin',
-            metadata: { company_name, website_url: normalizedUrl, stage: stage || 'New' }
+            metadata: {
+                company_name,
+                website_url: normalizedUrl,
+                stage: stage || 'New'
+            }
         });
-        res.status(201).json(populatedLead);
+
+        return res.status(201).json(populatedLead);
+
     } catch (err) {
         console.error('Create lead error:', err);
-        res.status(500).json({ message: 'Server Error', error: err.message });
+
+        return res.status(500).json({
+            message: 'Server Error',
+            error: err.message
+        });
     }
 });
 
