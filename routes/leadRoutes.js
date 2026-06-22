@@ -260,7 +260,8 @@ router.post('/', auth, async (req, res) => {
         const initialPocStatus = resolvedLeadStatus === 'incomplete' ? 'pending' : 'approved';
         const processedPocs = (points_of_contact || []).map(poc => ({
             ...poc,
-            approvalStatus: initialPocStatus
+            approvalStatus: initialPocStatus,
+            createdBy: req.user.id
         }));
 
         const finalAssignedBy = (req.user.role === 'Admin' && assignedBy) ? assignedBy : req.user.id;
@@ -452,7 +453,16 @@ router.get('/approval-pocs', auth, async (req, res) => {
                     foreignField: "_id",
                     as: "assignedToPopulated"
                 }
-            }
+            },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "points_of_contact.createdBy",
+                    foreignField: "_id",
+                    as: "pocCreatedByPopulated"
+                }
+            },
+            { $unwind: { path: "$pocCreatedByPopulated", preserveNullAndEmptyArrays: true } }
         );
 
         // Use $facet for pagination
@@ -460,7 +470,7 @@ router.get('/approval-pocs', auth, async (req, res) => {
             $facet: {
                 metadata: [{ $count: "total" }],
                 data: [
-                    { $sort: { createdAt: -1 } }, // sort by Lead creation date
+                    { $sort: { "points_of_contact.createdAt": -1, createdAt: -1 } }, // sort by POC creation date, fallback to Lead creation date
                     { $skip: skip },
                     { $limit: limit },
                     {
@@ -471,6 +481,11 @@ router.get('/approval-pocs', auth, async (req, res) => {
                             email: "$points_of_contact.email",
                             designation: "$points_of_contact.designation",
                             approvalStatus: "$points_of_contact.approvalStatus",
+                            createdAt: "$points_of_contact.createdAt",
+                            createdBy: {
+                                _id: "$pocCreatedByPopulated._id",
+                                name: "$pocCreatedByPopulated.name"
+                            },
                             lead: {
                                 _id: "$_id",
                                 company_name: "$company_name",
@@ -935,10 +950,14 @@ router.put('/:id', auth, async (req, res) => {
             oldLead.points_of_contact = points_of_contact.map(np => {
                 const existing = oldPocs.find(op => op._id.toString() === np._id?.toString());
                 const approvalStatus = existing ? existing.approvalStatus : (oldLead.status === 'incomplete' ? 'pending' : 'approved');
+                const createdAt = existing ? existing.createdAt : new Date();
+                const createdBy = existing ? existing.createdBy : req.user.id;
 
                 return {
                     ...np,
-                    approvalStatus
+                    approvalStatus,
+                    createdAt,
+                    createdBy
                 };
             });
         }
@@ -983,7 +1002,14 @@ router.put('/:id', auth, async (req, res) => {
 
             // Process POCs: new ones (without _id) are pending if lead is approved (unless admin)
             updateData.points_of_contact = points_of_contact.map(poc => {
-                if (poc._id) return poc; // existing
+                if (poc._id) {
+                    const existing = oldLead.points_of_contact.id(poc._id);
+                    return {
+                        ...poc,
+                        createdAt: existing ? existing.createdAt : new Date(),
+                        createdBy: existing ? existing.createdBy : req.user.id
+                    };
+                }
 
                 // New POC logic:
                 // If the lead itself is incomplete (approve leads tab), new POCs are 'pending'.
@@ -992,7 +1018,9 @@ router.put('/:id', auth, async (req, res) => {
 
                 return {
                     ...poc,
-                    approvalStatus: initialStatus
+                    approvalStatus: initialStatus,
+                    createdAt: new Date(),
+                    createdBy: req.user.id
                 };
             });
         }
@@ -1229,7 +1257,8 @@ router.post('/:id/poc', auth, async (req, res) => {
             email,
             linkedin_url,
             stage: stage || 'New',
-            approvalStatus: initialStatus
+            approvalStatus: initialStatus,
+            createdBy: req.user.id
         };
         lead.points_of_contact.push(newPOC);
         await lead.save();
@@ -1475,6 +1504,9 @@ router.patch('/:id/approve', auth, async (req, res) => {
                 const pocObj = poc.toObject();
                 delete pocObj._id; // Remove duplicate ID to allow mongo to generate a new one
                 pocObj.approvalStatus = 'approved';
+                if (!pocObj.createdBy) {
+                    pocObj.createdBy = lead.createdBy || lead.assignedBy;
+                }
                 return pocObj;
             });
             originalLead.points_of_contact.push(...newPocs);

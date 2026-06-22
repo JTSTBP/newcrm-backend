@@ -35,6 +35,11 @@ const PointOfContactSchema = new mongoose.Schema({
         type: String,
         enum: ["pending", "approved", "rejected"],
     },
+    createdAt: { type: Date, default: Date.now },
+    createdBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "users",
+    },
 });
 
 const LeadSchema = new mongoose.Schema(
