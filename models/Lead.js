@@ -25,6 +25,7 @@ const PointOfContactSchema = new mongoose.Schema({
     email: { type: String },
     linkedin_url: { type: String },
     requirementId: { type: String },
+
     stage: {
         type: String,
         enum: ["New", "Contacted", "Busy", "No Answer", "Wrong Number"],
@@ -35,6 +36,8 @@ const PointOfContactSchema = new mongoose.Schema({
         type: String,
         enum: ["pending", "approved", "rejected"],
     },
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "users" },
+    rejectedAt: { type: Date },
     createdAt: { type: Date, default: Date.now },
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
@@ -54,6 +57,8 @@ const LeadSchema = new mongoose.Schema(
             enum: ["incomplete", "approved", "rejected"],
             default: "approved",
         },
+        rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "users" },
+        rejectedAt: { type: Date },
         hiring_needs: [{ type: String }],
         points_of_contact: [PointOfContactSchema],
         lead_source: { type: String },

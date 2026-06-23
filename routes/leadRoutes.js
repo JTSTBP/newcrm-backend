@@ -102,9 +102,11 @@ router.get('/', auth, async (req, res) => {
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit)
+            .populate('rejectedBy','name email')
             .populate('assignedBy', 'name email')
             .populate('createdBy', 'name email')
             .populate('assignedTo', 'name email');
+        
 
         const results = leads.map(lead => {
             const leadObj = lead.toObject();
@@ -1825,9 +1827,12 @@ router.patch('/:id/reject', auth, async (req, res) => {
         const lead = await Lead.findById(req.params.id);
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
+        // Set rejection metadata
         lead.status = 'rejected';
+        lead.rejectedBy = req.user.id;
+        lead.rejectedAt = new Date();
         await lead.save();
-
+        await lead.populate('rejectedBy', 'name email');
         res.json({ message: 'Lead rejected successfully', lead });
     } catch (err) {
         console.error('Reject lead error:', err);
@@ -1901,8 +1906,10 @@ router.patch('/:id/reject-poc/:pocId', auth, async (req, res) => {
         if (!poc) return res.status(404).json({ message: 'POC not found' });
 
         poc.approvalStatus = 'rejected';
+        poc.rejectedBy = req.user.id;
+        poc.rejectedAt = new Date();
         await lead.save();
-
+        await lead.populate('points_of_contact.rejectedBy', 'name email');
         res.json({ message: 'Point of Contact rejected successfully', lead });
     } catch (err) {
         console.error('Reject POC error:', err);
