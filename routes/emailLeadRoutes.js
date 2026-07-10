@@ -869,7 +869,7 @@ router.post('/render-ai-email', auth, async (req, res) => {
       return res.status(403).json({ message: 'Access denied.' });
     }
 
-    const { leadId, pocId, content } = req.body || {};
+    const { leadId, pocId, content, pointOfContactOverrides = {} } = req.body || {};
     if (!mongoose.isValidObjectId(leadId) || !mongoose.isValidObjectId(pocId)) {
       return res.status(400).json({ message: 'Valid leadId and pocId are required.' });
     }
@@ -891,6 +891,18 @@ router.post('/render-ai-email', auth, async (req, res) => {
     }
 
     const resources = getEmailResources();
+    const overrideText = (value, fallback = '') => typeof value === 'string' && value.trim() ? value.trim() : fallback;
+    const displayName = value => String(value || '').trim().replace(/\b([a-z])/g, char => char.toUpperCase());
+    const renderedPoc = {
+      name: displayName(overrideText(pointOfContactOverrides.name, poc.name)),
+      email: overrideText(pointOfContactOverrides.email, poc.email),
+      designation: overrideText(pointOfContactOverrides.designation, poc.designation),
+      phone: overrideText(pointOfContactOverrides.phone, poc.phone),
+      linkedInUrl: overrideText(
+        pointOfContactOverrides.linkedInUrl || pointOfContactOverrides.linkedin_url || pointOfContactOverrides.linkedin_link,
+        poc.linkedin_url || poc.linkedin_link
+      )
+    };
     const rendered = renderEmailDraft({
       content,
       context: {
@@ -901,12 +913,7 @@ router.post('/render-ai-email', auth, async (req, res) => {
           industry: lead.industry_name,
           companySize: lead.company_size
         },
-        pointOfContact: {
-          name: poc.name,
-          email: poc.email,
-          designation: poc.designation,
-          linkedInUrl: poc.linkedin_url
-        }
+        pointOfContact: renderedPoc
       },
       resources
     });
@@ -984,7 +991,7 @@ router.post('/send-mails', auth, async (req, res) => {
       return res.status(403).json({ message: 'Access denied.' });
     }
 
-    const { to, subject, htmlBody, leadId, pocId } = req.body;
+    const { to, subject, htmlBody, plainText, leadId, pocId, pointOfContactOverrides = {} } = req.body;
 
     if (!to || !to.trim()) {
       return res.status(400).json({ message: 'Recipient email (to) is required.' });
@@ -1020,6 +1027,7 @@ router.post('/send-mails', auth, async (req, res) => {
 
     // If a leadId is provided, confirm it exists and the requester owns/can access it
     let lead = null;
+    let selectedPoc = null;
     if (leadId) {
       ({ lead } = await findLeadAcrossCollections(leadId));
       if (!lead) {
@@ -1040,7 +1048,41 @@ router.post('/send-mails', auth, async (req, res) => {
           return res.status(403).json({ message: 'Access denied. You do not own this lead.' });
         }
       }
+      if (pocId && lead.points_of_contact?.id) selectedPoc = lead.points_of_contact.id(pocId);
     }
+
+    const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const replaceIfChanged = (body, original, current) => {
+      if (!body || !original || !current || String(original).trim() === String(current).trim()) return body;
+      return String(body).replace(new RegExp(escapeRegExp(String(original).trim()), 'gi'), String(current).trim());
+    };
+    const currentPoc = {
+      name: String(pointOfContactOverrides.name || selectedPoc?.name || '').trim().replace(/\b([a-z])/g, char => char.toUpperCase()),
+      email: pointOfContactOverrides.email || to.trim(),
+      designation: pointOfContactOverrides.designation || selectedPoc?.designation || '',
+      phone: pointOfContactOverrides.phone || selectedPoc?.phone || '',
+      linkedInUrl: pointOfContactOverrides.linkedInUrl || pointOfContactOverrides.linkedin_url || pointOfContactOverrides.linkedin_link || selectedPoc?.linkedin_url || selectedPoc?.linkedin_link || ''
+    };
+    const originalFirstName = String(selectedPoc?.name || '').trim().split(/\s+/)[0] || '';
+    const currentFirstName = String(currentPoc.name || '').trim().split(/\s+/)[0] || '';
+    const applyPocOverridesToBody = body => {
+      let output = String(body || '')
+        .replace(/\{\{\s*POC_NAME\s*\}\}/gi, currentPoc.name)
+        .replace(/\{\{\s*POC_FIRST_NAME\s*\}\}/gi, currentFirstName)
+        .replace(/\{\{\s*POC_EMAIL\s*\}\}/gi, currentPoc.email)
+        .replace(/\{\{\s*POC_DESIGNATION\s*\}\}/gi, currentPoc.designation)
+        .replace(/\{\{\s*POC_PHONE\s*\}\}/gi, currentPoc.phone)
+        .replace(/\{\{\s*POC_LINKEDIN\s*\}\}/gi, currentPoc.linkedInUrl);
+      output = replaceIfChanged(output, selectedPoc?.name, currentPoc.name);
+      output = replaceIfChanged(output, originalFirstName, currentFirstName);
+      output = replaceIfChanged(output, selectedPoc?.email, currentPoc.email);
+      output = replaceIfChanged(output, selectedPoc?.designation, currentPoc.designation);
+      output = replaceIfChanged(output, selectedPoc?.phone, currentPoc.phone);
+      output = replaceIfChanged(output, selectedPoc?.linkedin_url || selectedPoc?.linkedin_link, currentPoc.linkedInUrl);
+      return output;
+    };
+    const finalHtmlBody = applyPocOverridesToBody(htmlBody);
+    const finalPlainText = plainText ? applyPocOverridesToBody(plainText) : undefined;
 
     const limitResult = await reserveDailyEmailSlot({
       userId: req.user.id,
@@ -1080,7 +1122,8 @@ router.post('/send-mails', auth, async (req, res) => {
         from: sendingUser.name ? `"${sendingUser.name}" <${sendingUser.email}>` : sendingUser.email,
         to: to.trim(),
         subject: subject.trim(),
-        html: htmlBody
+        html: finalHtmlBody,
+        ...(finalPlainText ? { text: finalPlainText } : {})
       });
     } catch (mailErr) {
       await releaseDailyEmailReservation(reservationId).catch(releaseError => {

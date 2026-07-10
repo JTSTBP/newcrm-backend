@@ -2,6 +2,14 @@ const { buildEmailFooter } = require('./emailFooterBuilder');
 const { escapeHtml, withLineBreaks } = require('./emailHtmlTemplateHelpers');
 
 const text = (value, maxLength) => String(value || '').trim().slice(0, maxLength);
+const displayName = value => String(value || '').trim().replace(/\b([a-z])/g, char => char.toUpperCase());
+const normalizeGreetingName = (greeting, pointOfContact) => {
+  const name = displayName(pointOfContact?.name);
+  if (!name) return greeting;
+  return String(greeting || '').replace(/^(\s*(?:hi|hello|dear)\s+)([^,\n\r]+)([,\n\r].*)?$/i, (_match, prefix, _oldName, suffix = ',') =>
+    `${prefix}${name}${suffix || ','}`
+  );
+};
 const normalizeEmailContent = (content) => {
   if (!content || typeof content !== 'object' || !Array.isArray(content.bullets)) {
     throw Object.assign(new Error('Valid dynamic email content is required.'), { code: 'INVALID_EMAIL_CONTENT' });
@@ -33,18 +41,20 @@ const proofLinks = (resources) => [
 
 const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfContact, resources }) => {
   const content = normalizeEmailContent(rawContent);
+  content.greeting = normalizeGreetingName(content.greeting, pointOfContact);
   const companyName = company?.name || 'your company';
-  const identity = [pointOfContact?.designation, companyName, company?.industry].filter(Boolean).join(' · ');
+  const pocDisplayName = displayName(pointOfContact?.name);
+  const identity = [pointOfContact?.designation, companyName, company?.industry].filter(Boolean).join(' Â· ');
   const companyLinks = [
-    company?.website ? `<a href="${escapeHtml(company.website)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">Company website ↗</a>` : '',
-    company?.linkedInUrl ? `<a href="${escapeHtml(company.linkedInUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">Company LinkedIn ↗</a>` : '',
-    pointOfContact?.linkedInUrl ? `<a href="${escapeHtml(pointOfContact.linkedInUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">POC profile ↗</a>` : ''
-  ].filter(Boolean).join('<span style="color:#cbd5e1;margin:0 10px;">•</span>');
+    company?.website ? `<a href="${escapeHtml(company.website)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">Company website â†—</a>` : '',
+    company?.linkedInUrl ? `<a href="${escapeHtml(company.linkedInUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">Company LinkedIn â†—</a>` : '',
+    pointOfContact?.linkedInUrl ? `<a href="${escapeHtml(pointOfContact.linkedInUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:none;font-weight:700;">POC profile â†—</a>` : ''
+  ].filter(Boolean).join('<span style="color:#cbd5e1;margin:0 10px;">â€¢</span>');
   const pocDetails = [
-    pointOfContact?.name,
+    pocDisplayName,
     pointOfContact?.designation,
     pointOfContact?.email
-  ].filter(Boolean).map(value => escapeHtml(value)).join(' · ');
+  ].filter(Boolean).map(value => escapeHtml(value)).join(' Â· ');
 
   return `<!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:#eef2f6;font-family:Arial,'Helvetica Neue',sans-serif;color:#172033;">
@@ -58,7 +68,7 @@ const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfCon
   </td></tr>
 
   <tr><td style="padding:34px 38px 20px;">
-    <div style="font-size:12px;font-weight:800;color:#0f766e;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:8px;">A note for ${escapeHtml(pointOfContact?.name || 'you')}</div>
+    <div style="font-size:12px;font-weight:800;color:#0f766e;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:8px;">A note for ${escapeHtml(pocDisplayName || 'you')}</div>
     ${pocDetails ? `<div style="font-size:11px;color:#64748b;margin-bottom:14px;">${pocDetails}</div>` : ''}
     <div style="font-size:25px;font-weight:800;line-height:1.3;color:#102a43;margin-bottom:7px;">${withLineBreaks(content.greeting)}</div>
     ${identity ? `<div style="font-size:13px;color:#64748b;margin-bottom:22px;">${escapeHtml(identity)}</div>` : ''}
@@ -75,7 +85,7 @@ const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfCon
   </td></tr>
 
   <tr><td style="padding:22px 38px 8px;">
-    <div style="font-size:11px;font-weight:900;color:#7c3aed;letter-spacing:1.1px;text-transform:uppercase;margin-bottom:9px;">Why I’m reaching out</div>
+    <div style="font-size:11px;font-weight:900;color:#7c3aed;letter-spacing:1.1px;text-transform:uppercase;margin-bottom:9px;">Why Iâ€™m reaching out</div>
     <div style="font-size:15px;line-height:1.8;color:#334155;">${withLineBreaks(content.pitchLine)}</div>
   </td></tr>
 
@@ -91,7 +101,7 @@ const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfCon
   <tr><td style="padding:18px 38px;">
     <div style="font-size:11px;font-weight:900;color:#7c3aed;letter-spacing:1.1px;text-transform:uppercase;margin-bottom:12px;">Relevant proof</div>
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr>${proofLinks(resources).map(link => `
-      <td style="padding:0 7px 8px 0;"><a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" style="display:block;padding:12px 13px;border:1px solid #ddd6fe;border-radius:10px;color:#6d28d9;text-decoration:none;font-size:12px;font-weight:800;text-align:center;">${escapeHtml(link.label)} →</a></td>`).join('')}</tr></table>
+      <td style="padding:0 7px 8px 0;"><a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" style="display:block;padding:12px 13px;border:1px solid #ddd6fe;border-radius:10px;color:#6d28d9;text-decoration:none;font-size:12px;font-weight:800;text-align:center;">${escapeHtml(link.label)} â†’</a></td>`).join('')}</tr></table>
     <div style="font-size:13px;line-height:1.7;color:#64748b;margin-top:8px;">${withLineBreaks(content.closingLine)}</div>
   </td></tr>
 
@@ -108,8 +118,9 @@ const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfCon
 </table></td></tr></table></body></html>`.trim();
 };
 
-const buildAiPersonalizedPlainText = ({ content: rawContent, company, resources }) => {
+const buildAiPersonalizedPlainText = ({ content: rawContent, company, pointOfContact, resources }) => {
   const content = normalizeEmailContent(rawContent);
+  content.greeting = normalizeGreetingName(content.greeting, pointOfContact);
   return [
     content.greeting,
     'PERSONAL NOTE',
@@ -117,10 +128,10 @@ const buildAiPersonalizedPlainText = ({ content: rawContent, company, resources 
     'COMPANY INSIGHT',
     content.contextLine,
     content.companyBlurb,
-    'WHY I’M REACHING OUT',
+    'WHY Iâ€™M REACHING OUT',
     content.pitchLine,
     'HOW JOBS TERRITORY CAN HELP',
-    ...content.bullets.map(bullet => `• ${bullet}`),
+    ...content.bullets.map(bullet => `â€¢ ${bullet}`),
     'RELEVANT PROOF',
     content.closingLine,
     ...proofLinks(resources).map(link => `${link.label}: ${link.url}`),
