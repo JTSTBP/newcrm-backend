@@ -50,6 +50,19 @@ const htmlToText = (html) => String(html || '')
   .replace(/\s+/g, ' ')
   .trim();
 
+const isTemplateOrAssetUrl = (rawUrl) => {
+  const value = String(rawUrl || '');
+  if (!value || /(\{\{|%7B%7B|<%|%3C%25|javascript:|mailto:|tel:|#)/i.test(value)) return true;
+  try {
+    const url = new URL(value);
+    return /\.(png|jpe?g|gif|webp|svg|pdf|zip|css|js|ico)([?#].*)?$/i.test(url.pathname);
+  } catch {
+    return true;
+  }
+};
+
+const isExpectedCareerProbe404 = (error) => /Website returned 404/i.test(String(error?.message || error));
+
 const fetchPublicPage = async (rawUrl, redirectCount = 0) => {
   if (redirectCount > 3) throw new Error('Too many website redirects.');
   const url = await validatePublicUrl(rawUrl);
@@ -111,6 +124,7 @@ const extractLinks = (html, baseUrl) => {
   while ((match = pattern.exec(String(html || ''))) && links.length < 100) {
     try {
       const url = new URL(match[1], baseUrl).toString();
+      if (isTemplateOrAssetUrl(url)) continue;
       const label = htmlToText(match[2]);
       if (CAREER_LINK_PATTERN.test(`${label} ${url}`)) links.push(url);
     } catch {}
@@ -309,7 +323,9 @@ async function researchCompanyPublicly(context) {
       const settled = await Promise.allSettled(pagePlans.map(plan => fetchPublicPage(plan.url)));
       settled.forEach((result, index) => {
         if (result.status !== 'fulfilled' || !result.value.text) {
-          diagnostics.rejectedSources.push({ url: pagePlans[index].url, reason: result.reason?.message || 'No readable text' });
+          if (!isExpectedCareerProbe404(result.reason)) {
+            diagnostics.rejectedSources.push({ url: pagePlans[index].url, reason: result.reason?.message || 'No readable text' });
+          }
           return;
         }
         const plan = pagePlans[index];
@@ -333,7 +349,9 @@ async function researchCompanyPublicly(context) {
         const secondLevel = await Promise.allSettled(secondLevelUrls.map(url => fetchPublicPage(url)));
         secondLevel.forEach((result, index) => {
           if (result.status !== 'fulfilled' || !result.value.text) {
-            diagnostics.rejectedSources.push({ url: secondLevelUrls[index], reason: result.reason?.message || 'No readable text' });
+            if (!isExpectedCareerProbe404(result.reason)) {
+              diagnostics.rejectedSources.push({ url: secondLevelUrls[index], reason: result.reason?.message || 'No readable text' });
+            }
             return;
           }
           const provider = atsProviderForUrl(result.value.url);

@@ -390,7 +390,7 @@ const generatePersonalizedEmail = async ({ context, resources, signal, leadId, p
         if (!['AI_PROVIDER_BUSY', 'AI_RATE_LIMIT', 'AI_TIMEOUT'].includes(retryError.code) && retryError.name !== 'AbortError') throw retryError;
         return { ...buildFallbackEmail({ context, resources, reason: retryError.code }), retry };
       }
-    } else if (['AI_RATE_LIMIT', 'AI_TIMEOUT'].includes(error.code) || error.name === 'AbortError' || error.code === 20) {
+    } else if (['AI_RATE_LIMIT', 'AI_TIMEOUT', 'AI_PROVIDER_ERROR'].includes(error.code) || error.name === 'AbortError' || error.code === 20) {
       return { ...buildFallbackEmail({ context, resources, reason: error.code || error.name }), retry };
     } else {
       throw error;
