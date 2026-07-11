@@ -218,12 +218,13 @@ const applyResearchToContext = (context, publicResearch, jobDiscovery) => {
     roleClassification: context.pointOfContact.roleClassification
   };
   const extractionDiagnostics = {};
-  context.detectedJobs = (jobDiscovery?.websiteJobs || []).map(job => ({
+  context.detectedJobs = ([...(jobDiscovery?.websiteJobs || []), ...(jobDiscovery?.publicJobs || [])]).slice(0, 5).map(job => ({
     title: job.title, location: job.location, department: job.department, source: job.source,
     evidenceUrl: job.applyUrl, evidenceText: job.evidenceText, sourceType: job.sourceType,
     confidence: job.confidence, detectedAt: new Date().toISOString(), association: 'company-level'
   }));
   context.industryDefaultJobs = jobDiscovery?.industryDefaultJobs || [];
+  context.industryIntroduction = jobDiscovery?.industryIntroduction || '';
   context.jobDiscovery = jobDiscovery;
   context.currentJobs = context.detectedJobs;
   context.hiringSummary = buildHiringSummary(context);
@@ -239,6 +240,125 @@ const applyResearchToContext = (context, publicResearch, jobDiscovery) => {
   console.info('[ENRICHMENT REJECTED]', context.enrichment.diagnostics.rejectedReasons);
 };
 
+const cleanSentence = value => String(value || '').replace(/\s+/g, ' ').trim().replace(/[.。]+$/, '');
+
+const industryIntroContext = industryName => {
+  const normalized = String(industryName || '').toLowerCase();
+  if (/interior|design|space|modular/.test(normalized)) {
+    return {
+      companyFocus: 'helping customers create well-designed, functional, and visually appealing spaces',
+      talentNeed: 'creative, technical, site-management, procurement, and client-coordination talent',
+      outcome: 'delivering projects on time while maintaining a high standard of design quality'
+    };
+  }
+  if (/food|beverage|fmcg|consumer|dairy|packaged/.test(normalized)) {
+    return {
+      companyFocus: 'delivering consistent, high-quality products to consumers',
+      talentNeed: 'production, quality, packaging, supply-chain, sales, and operations talent',
+      outcome: 'maintaining product quality, timely distribution, and customer trust as demand grows'
+    };
+  }
+  if (/technology|software|\bit\b|saas|digital/.test(normalized)) {
+    return {
+      companyFocus: 'building technology-led products and services for customers',
+      talentNeed: 'engineering, product, QA, DevOps, data, support, and project-delivery talent',
+      outcome: 'shipping reliable solutions faster while maintaining quality and delivery discipline'
+    };
+  }
+  if (/manufactur|industrial|factory|plant/.test(normalized)) {
+    return {
+      companyFocus: 'supporting production, quality, and operational excellence',
+      talentNeed: 'production, maintenance, quality, safety, procurement, logistics, and plant-operations talent',
+      outcome: 'keeping output consistent, reducing delays, and meeting customer commitments'
+    };
+  }
+  if (/health|medical|hospital|clinic|pharma/.test(normalized)) {
+    return {
+      companyFocus: 'delivering dependable healthcare services and patient support',
+      talentNeed: 'clinical, technical, administrative, diagnostics, billing, and patient-support talent',
+      outcome: 'maintaining service quality, compliance, and continuity of care'
+    };
+  }
+  if (/education|edtech|training|school|college|learning/.test(normalized)) {
+    return {
+      companyFocus: 'supporting learning outcomes and student engagement',
+      talentNeed: 'faculty, counselling, admissions, academic coordination, operations, and marketing talent',
+      outcome: 'improving learner experience while supporting admissions and operational growth'
+    };
+  }
+  if (/real estate|property|broker|developer/.test(normalized)) {
+    return {
+      companyFocus: 'connecting customers with the right property and project solutions',
+      talentNeed: 'sales, CRM, site coordination, project-support, marketing, and operations talent',
+      outcome: 'improving customer follow-up, project momentum, and conversion quality'
+    };
+  }
+  if (/construction|infrastructure|civil|epc/.test(normalized)) {
+    return {
+      companyFocus: 'executing projects where timelines, quality, safety, and coordination matter',
+      talentNeed: 'civil engineering, site execution, safety, procurement, billing, and project-control talent',
+      outcome: 'keeping projects on schedule while maintaining delivery quality'
+    };
+  }
+  if (/e-?commerce|marketplace|d2c|retail/.test(normalized)) {
+    return {
+      companyFocus: 'serving customers through fast-moving retail and digital commerce operations',
+      talentNeed: 'sales, store, catalogue, warehouse, customer-support, merchandising, and digital-growth talent',
+      outcome: 'maintaining customer experience, fulfilment speed, and business growth'
+    };
+  }
+  if (/finance|financial|bfsi|bank|insurance|fintech/.test(normalized)) {
+    return {
+      companyFocus: 'supporting customers with financial products, services, and operations',
+      talentNeed: 'sales, relationship-management, operations, compliance, finance, and customer-support talent',
+      outcome: 'building trust while keeping operations accurate and responsive'
+    };
+  }
+  if (/logistics|supply chain|warehouse|transport|freight/.test(normalized)) {
+    return {
+      companyFocus: 'moving goods and coordinating fulfilment with speed and reliability',
+      talentNeed: 'warehouse, dispatch, fleet, transport, inventory, procurement, and coordination talent',
+      outcome: 'improving fulfilment timelines and operational consistency'
+    };
+  }
+  if (/hospitality|hotel|travel|tourism|restaurant/.test(normalized)) {
+    return {
+      companyFocus: 'creating consistent guest and customer experiences',
+      talentNeed: 'front-office, guest relations, operations, housekeeping, kitchen, sales, and service talent',
+      outcome: 'maintaining service quality and smooth day-to-day operations'
+    };
+  }
+  if (/digital marketing|seo|performance|creative|agency|social media/.test(normalized)) {
+    return {
+      companyFocus: 'helping brands grow through campaigns, creative execution, and digital performance',
+      talentNeed: 'performance marketing, SEO, content, design, analytics, client-servicing, and business-development talent',
+      outcome: 'delivering campaigns consistently while improving client outcomes'
+    };
+  }
+  return {
+    companyFocus: 'serving customers and managing business growth across key functions',
+    talentNeed: 'sales, business development, operations, customer support, HR, finance, and administration talent',
+    outcome: 'keeping teams productive, responsive, and ready for current or upcoming business needs'
+  };
+};
+
+const buildRichEmailIntroduction = (context, industryName) => {
+  const companyName = context.company?.name || 'your company';
+  const industry = industryName || 'General Business Services';
+  const profileText = cleanSentence(context.company?.companyInfo || context.enrichment?.companySummary || '');
+  const industryContext = industryIntroContext(industry);
+  const verifiedCompanyPhrase = profileText && profileText.length <= 180
+    ? ` I also noticed that ${profileText.charAt(0).toLowerCase()}${profileText.slice(1)}.`
+    : '';
+
+  return [
+    `I came across ${companyName} and was impressed by your work in the ${industry} industry and your focus on ${industryContext.companyFocus}.${verifiedCompanyPhrase}`,
+    `As your projects, operations, and customer base grow, finding the right ${industryContext.talentNeed} becomes essential for ${industryContext.outcome}.`,
+    'I’m reaching out from Jobs Territory, a recruitment and talent acquisition partner that helps companies identify, screen, and hire suitable candidates across multiple roles. We support businesses with pre-screened, job-ready professionals based on their specific hiring requirements.',
+    `If ${companyName} has any current or upcoming openings, we would be happy to support your recruitment needs.`
+  ].join('\n\n');
+};
+
 const applySelectedPocIdentity = (content, context) => {
   const pocName = String(context.pointOfContact?.name || '').trim();
   const firstName = pocName.split(/\s+/)[0];
@@ -247,41 +367,47 @@ const applySelectedPocIdentity = (content, context) => {
   const industryDefaults = context.industryDefaultJobs || [];
   const displayJobs = detectedJobs.length ? detectedJobs : industryDefaults;
   const fallbackSource = context.jobDiscovery?.jobResearchSource;
-  const fallbackSourceLabel = fallbackSource === 'saved_industry_fallback'
-    ? `saved industry profile${context.jobDiscovery?.savedIndustryName ? ` (${context.jobDiscovery.savedIndustryName})` : ''}`
-    : fallbackSource === 'saved_hiring_needs_fallback'
-      ? 'saved hiring needs'
-      : 'company profile inference';
   const openingBullets = detectedJobs.length ? detectedJobs.map(job => {
-    const sourceContext = job.source === 'POC LinkedIn' ? 'POC LinkedIn — from your recent LinkedIn hiring activity'
-      : job.source === 'Company Careers' ? 'Company Careers — from your careers page'
-        : job.source === 'LinkedIn Jobs' ? 'LinkedIn Jobs — from LinkedIn jobs evidence' : 'Public Search';
-    return `• ${job.title}${job.location || job.department ? ` — ${job.location || job.department}` : ''} — ${sourceContext}`;
-  }) : industryDefaults.length ? industryDefaults.map(job => `• ${job.title} — common role based on ${fallbackSourceLabel}, not presented as an active opening`)
-    : ['• Jobs Territory can support relevant hiring needs as they are identified.'];
+    const sourceContext = job.source === 'POC LinkedIn' ? 'POC LinkedIn - from recent LinkedIn hiring activity'
+      : job.source === 'Company Careers' ? 'Company Careers - from the careers page'
+        : /LinkedIn Jobs/i.test(job.source) ? 'LinkedIn Jobs - from public search evidence'
+          : ['Naukri', 'Indeed', 'Instahyre', 'Wellfound'].includes(job.source) ? `${job.source} - from public job evidence` : 'Public Search';
+    return `- ${job.title}${job.location || job.department ? ` - ${job.location || job.department}` : ''} - ${sourceContext}`;
+  }) : industryDefaults.length ? industryDefaults.map(job => `- ${job.title}`)
+    : ['- Jobs Territory can support relevant hiring needs as they are identified.'];
   const helpBullets = displayJobs.length ? [
-    '• We can share pre-vetted candidates matching these roles.',
-    '• We can help reduce screening time.',
-    '• We can support urgent or bulk hiring needs.',
-    '• We can help with replacement/backfill support.'
+    '- Pre-screened and qualified candidates',
+    '- Quick turnaround on hiring requirements',
+    '- Permanent and contract staffing',
+    '- PAN India talent sourcing',
+    '- Domain-specific recruitment expertise',
+    '- Dedicated recruiter support throughout the hiring process'
   ] : [
-    '• We can provide flexible sourcing and screening support as verified hiring needs arise.',
-    '• We can help reduce screening time without assuming active openings.'
+    '- We can provide flexible sourcing and screening support as verified hiring needs arise.',
+    '- We can help reduce screening time without assuming active openings.'
   ];
+  const industryName = context.jobDiscovery?.resolvedIndustry || context.jobDiscovery?.savedIndustryName || context.company?.industry || context.company?.industryName;
+  const relevantSupportParagraph = detectedJobs.length
+    ? 'If any of these roles are part of your current hiring priorities, Jobs Territory can help you build relevant shortlists faster with candidates screened for role fit, experience, communication, and availability.'
+    : 'If you have current or upcoming hiring requirements, Jobs Territory can help you build relevant shortlists faster with candidates screened for role fit, experience, communication, and availability.';
   return {
     ...content,
     greeting: firstName ? `Hi ${firstName},` : content.greeting,
+    openingLine: buildRichEmailIntroduction(context, industryName),
+    companyBlurb: relevantSupportParagraph,
     contextLine: detectedJobs.length
-      ? `Current roles found on your company website:\n${openingBullets.slice(0, 4).join('\n')}`
+      ? context.jobDiscovery?.jobResearchSource === 'public_jobs'
+        ? `Current roles found from public job evidence:\n${openingBullets.slice(0, 4).join('\n')}`
+        : `Current roles found on your company website:\n${openingBullets.slice(0, 4).join('\n')}`
       : industryDefaults.length
-        ? fallbackSource === 'saved_industry_fallback'
-          ? `Based on your company's saved industry profile, companies in your sector commonly hire for roles such as:\n${openingBullets.slice(0, 5).join('\n')}`
-          : fallbackSource === 'saved_hiring_needs_fallback'
-            ? `Based on your saved hiring needs, similar companies commonly hire for roles such as:\n${openingBullets.slice(0, 5).join('\n')}`
-            : `Based on your company profile, Jobs Territory can support roles such as:\n${openingBullets.slice(0, 5).join('\n')}`
+        ? fallbackSource === 'saved_industry_fallback' || fallbackSource === 'gemini_industry_fallback'
+          ? `Based on the ${industryName || 'your'} industry, we regularly source candidates for positions such as:\n${openingBullets.slice(0, 20).join('\n')}`
+          : fallbackSource === 'crm_hiring_needs'
+            ? `Based on your saved hiring needs, we regularly source candidates for roles such as:\n${openingBullets.slice(0, 12).join('\n')}`
+            : `Based on your company profile, we can help source candidates for roles such as:\n${openingBullets.slice(0, 12).join('\n')}`
         : `Hiring support context:\n${openingBullets.join('\n')}`,
-    pitchLine: `How Jobs Territory can help:\n${helpBullets.join('\n')}`,
-    senderName: senderName ? `${senderName} — Jobs Territory` : 'Business Development Team — Jobs Territory'
+    pitchLine: `Our recruitment services include:\n${helpBullets.join('\n')}`,
+    senderName: senderName ? `${senderName} - Jobs Territory` : 'Business Development Team - Jobs Territory'
   };
 };
 
@@ -316,20 +442,20 @@ const buildFallbackEmail = ({ context, resources, reason }) => {
       ? `Company website hiring evidence includes ${roles.join(', ')} roles.`
       : roles.length
         ? `Based on the ${context.company?.industry || 'company'} industry, companies like this commonly hire for roles such as ${roles.join(', ')}.`
-      : `I couldn’t verify specific active openings, so I’m reaching out without assuming a current vacancy.`,
+      : `If ${companyName} has any current or upcoming hiring requirements, Jobs Territory would be happy to support your recruitment needs.`,
     pitchLine: '',
     bullets: ['Pre-vetted candidate sourcing', 'Focused screening and shortlisting', 'Flexible support for urgent or bulk requirements', 'Replacement and backfill support'],
     closingLine: 'You can review our case studies and client testimonials below.',
     ctaLine: 'Would a short conversation about your current or upcoming hiring priorities be useful?',
-    senderName: context.sender?.name ? `${context.sender.name} — Jobs Territory` : 'Business Development Team — Jobs Territory'
+    senderName: context.sender?.name ? `${context.sender.name}  -  Jobs Territory` : 'Business Development Team  -  Jobs Territory'
   }, context);
   const draft = {
-    subject: `${companyName} hiring support — Jobs Territory`,
+    subject: `${companyName} hiring support  -  Jobs Territory`,
     content,
     research: {
       companySummary: context.company?.companyInfo || `${companyName}${context.company?.industry ? ` operates in ${context.company.industry}` : ''}.`,
       contactContext: [pocName, designation].filter(Boolean).join(', '),
-      publicResearchSummary: roles.length ? `Evidence-derived roles: ${roles.join(', ')}.` : 'No specific active openings were verified.',
+      publicResearchSummary: roles.length ? `Relevant recruitment-support roles: ${roles.join(', ')}.` : 'No specific role list was available in the current context.',
       personalizationPoints: [designation, ...roles].filter(Boolean),
       dataGaps: [`AI provider unavailable (${reason}); deterministic CRM/research fallback used.`]
     }
@@ -351,6 +477,7 @@ const generatePersonalizedEmail = async ({ context, resources, signal, leadId, p
 
   const jobDiscovery = await discoverCompanyJobs({
     companyName: context.company?.name, websiteUrl: context.company?.website, industry: context.company?.industry,
+    companyInfo: context.company?.companyInfo || context.crmData?.companyInfo,
     hiringNeeds: context.company?.hiringNeeds || context.crmData?.hiringNeeds || [],
     linkedinUrl: context.company?.linkedInUrl, pocName: context.pointOfContact?.name,
     pocLinkedinUrl: context.pointOfContact?.linkedInUrl

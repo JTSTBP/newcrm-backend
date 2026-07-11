@@ -59,9 +59,11 @@ function buildCompanyHiringEnrichment({ context, publicResearch }) {
     companySummary,
     companyHiring,
     websiteJobs: context.jobDiscovery?.websiteJobs || [],
+    publicJobs: context.jobDiscovery?.publicJobs || [],
     industryDefaultJobs: context.jobDiscovery?.industryDefaultJobs || [],
     savedIndustryName: context.jobDiscovery?.savedIndustryName || clean(company.industry, 160),
     savedHiringNeeds: context.jobDiscovery?.savedHiringNeeds || (company.hiringNeeds || []).map(value => clean(value, 160)).filter(Boolean),
+    industryIntroduction: context.jobDiscovery?.industryIntroduction || '',
     jobResearchSource: context.jobDiscovery?.jobResearchSource || null,
     pocContext: {
       name: clean(poc.name, 120),

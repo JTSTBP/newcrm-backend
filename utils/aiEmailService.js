@@ -1,7 +1,7 @@
 const { buildAiEmailPrompt } = require('./aiEmailPrompt');
 const { GoogleGenAI } = require('@google/genai');
 
-const PROMPT_VERSION = 'ai-email-v13-saved-industry-fallback';
+const PROMPT_VERSION = 'ai-email-v14-industry-aware-outreach';
 const MODEL = process.env.GEMINI_MODEL || process.env.AI_MODEL || 'gemini-1.5-flash';
 const PROVIDER = 'Google Gemini';
 const REQUEST_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -167,4 +167,56 @@ async function generateAiEmail({ context, signal, client }) {
   }
 }
 
-module.exports = { generateAiEmail, PROMPT_VERSION, MODEL, PROVIDER, REQUEST_URL };
+async function inferIndustryWithGemini({ companyName, websiteUrl, companyInfo, linkedInUrl, researchSummary, websiteText, signal, client }) {
+  if (!client && !process.env.GEMINI_API_KEY) {
+    throw Object.assign(new Error('AI industry inference is not configured.'), { code: 'AI_NOT_CONFIGURED' });
+  }
+
+  const ai = client || new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), Math.min(AI_REQUEST_TIMEOUT_MS, 20_000));
+  const abortFromCaller = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abortFromCaller, { once: true });
+  }
+  try {
+    const input = {
+      companyName: cleanText(companyName, 180),
+      websiteUrl: cleanText(websiteUrl, 300),
+      companyInfo: cleanText(companyInfo, 900),
+      linkedInUrl: cleanText(linkedInUrl, 300),
+      researchSummary: cleanText(researchSummary, 1200),
+      websiteText: cleanText(websiteText, 1200)
+    };
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: `Infer the most likely industry for this company using only the verified company information below. Do not use POC designation as the basis. Return a short normalized industry name only, no explanation.\n\n${JSON.stringify(input, null, 2)}`,
+      config: {
+        systemInstruction: 'You classify company industries for a recruitment CRM. Return only one short normalized industry name such as Interior Design, Food and Beverages, Information Technology, Manufacturing, Healthcare, Education, Real Estate, Construction, E-commerce, Financial Services, Logistics and Supply Chain, Retail, Hospitality, Digital Marketing, or General Business Services.',
+        abortSignal: controller.signal
+      }
+    });
+    const industry = cleanText(response.text, 80).replace(/^["']|["']$/g, '').trim();
+    if (!industry || /^(unknown|n\/a|not sure|cannot determine)$/i.test(industry)) {
+      throw Object.assign(new Error('AI could not infer industry.'), { code: 'AI_INDUSTRY_UNKNOWN' });
+    }
+    return industry;
+  } catch (error) {
+    if (error.code === 'AI_INDUSTRY_UNKNOWN') throw error;
+    if (error.name === 'AbortError' || error.code === 20) {
+      throw Object.assign(new Error('AI industry inference timed out.'), { code: 'AI_TIMEOUT', name: 'AbortError' });
+    }
+    const status = Number(error.status || error.statusCode || error.code);
+    const providerError = new Error(status ? `AI industry inference failed (${status}).` : 'AI industry inference failed.');
+    providerError.code = status === 429 ? 'AI_RATE_LIMIT' : status === 503 ? 'AI_PROVIDER_BUSY' : 'AI_PROVIDER_ERROR';
+    providerError.providerStatus = Number.isFinite(status) ? status : undefined;
+    providerError.details = redactSecrets(error.message);
+    throw providerError;
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abortFromCaller);
+  }
+}
+
+module.exports = { generateAiEmail, inferIndustryWithGemini, PROMPT_VERSION, MODEL, PROVIDER, REQUEST_URL };

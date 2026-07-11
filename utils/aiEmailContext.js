@@ -5,7 +5,12 @@ const JOBS_TERRITORY_SERVICES = [
   'Sales, Marketing, Business Development, Operations, HR and leadership hiring support',
   'Candidate sourcing and pre-screening',
   'Focused shortlist delivery',
-  'Flexible recruitment capacity for client teams'
+  'Flexible recruitment capacity for client teams',
+  'PAN India hiring support',
+  'Permanent staffing',
+  'Contract staffing',
+  'Executive search',
+  'Dedicated recruiter support'
 ];
 
 function buildAiEmailContext({ lead, poc, sender, previousCrm, resources }) {

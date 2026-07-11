@@ -6,6 +6,11 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, character 
   '"': '&quot;'
 }[character]));
 
-const withLineBreaks = (value) => escapeHtml(value).replace(/\r?\n/g, '<br/>');
+const normalizeBulletMarkers = (value) => String(value ?? '')
+  .replace(/(^|\n)\s*\?\s+/g, '$1- ')
+  .replace(/(^|\n)\s*�\s+/g, '$1- ')
+  .replace(/(^|\n)\s*•\s+/g, '$1- ');
 
-module.exports = { escapeHtml, withLineBreaks };
+const withLineBreaks = (value) => escapeHtml(normalizeBulletMarkers(value)).replace(/\r?\n/g, '<br/>');
+
+module.exports = { escapeHtml, withLineBreaks, normalizeBulletMarkers };
