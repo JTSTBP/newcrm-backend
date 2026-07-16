@@ -963,9 +963,30 @@ const getTransporter = () => {
 };
 
 const gmailTransporterCache = new Map();
+const SMTP_DEFAULT_TIMEOUT_MS = Number(process.env.SMTP_TEST_TIMEOUT_MS || 8_000);
 const lookupIpv4Only = (hostname, options, callback) => {
   dns.lookup(hostname, { ...options, family: 4 }, callback);
 };
+const resolveGmailIpv4 = () => new Promise((resolve, reject) => {
+  dns.resolve4('smtp.gmail.com', (error, addresses) => {
+    if (error) return reject(error);
+    const address = addresses?.[0];
+    if (!address) return reject(new Error('No IPv4 address found for smtp.gmail.com'));
+    resolve(address);
+  });
+});
+const tcpConnectTest = ({ host, port, family = 4, timeoutMs = SMTP_DEFAULT_TIMEOUT_MS }) => new Promise((resolve) => {
+  const startedAt = Date.now();
+  const socket = net.connect({ host, port, family, timeout: timeoutMs });
+  const finish = result => {
+    socket.removeAllListeners();
+    socket.destroy();
+    resolve({ ...result, durationMs: Date.now() - startedAt, host, port, family });
+  };
+  socket.once('connect', () => finish({ ok: true }));
+  socket.once('timeout', () => finish({ ok: false, code: 'TIMEOUT', message: `TCP connection timed out after ${timeoutMs}ms` }));
+  socket.once('error', error => finish({ ok: false, code: error.code, message: error.message }));
+});
 const getGmailIpv4Socket = (options, callback) => {
   dns.resolve4('smtp.gmail.com', (dnsError, addresses) => {
     if (dnsError) return callback(dnsError);
@@ -981,33 +1002,92 @@ const getGmailIpv4Socket = (options, callback) => {
     socket.once('error', callback);
   });
 };
-const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
-  const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
-  const cacheKey = `ipv4-socket-v3:${userId}:${email}:${passwordHash}`;
-  const cached = gmailTransporterCache.get(cacheKey);
-  if (cached) return cached;
-
-  const userTransporter = nodemailer.createTransport({
+const buildGmailTransportConfig = async ({ email, appPassword, mode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587' }) => {
+  const common = {
+    auth: { user: email, pass: appPassword },
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 8_000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 8_000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 15_000)
+  };
+  if (mode === 'ssl-465') {
+    return {
+      ...common,
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      family: 4,
+      lookup: lookupIpv4Only,
+      tls: { servername: 'smtp.gmail.com' }
+    };
+  }
+  if (mode === 'default-587') {
+    return {
+      ...common,
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      requireTLS: process.env.SMTP_REQUIRE_TLS !== 'false',
+      tls: { servername: 'smtp.gmail.com' }
+    };
+  }
+  if (mode === 'custom-socket-587') {
+    return {
+      ...common,
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      family: 4,
+      lookup: lookupIpv4Only,
+      getSocket: getGmailIpv4Socket,
+      requireTLS: process.env.SMTP_REQUIRE_TLS !== 'false',
+      tls: { servername: 'smtp.gmail.com' }
+    };
+  }
+  if (mode === 'direct-ipv4-587') {
+    const ipv4 = await resolveGmailIpv4();
+    return {
+      ...common,
+      host: ipv4,
+      port: 587,
+      secure: false,
+      requireTLS: process.env.SMTP_REQUIRE_TLS !== 'false',
+      tls: { servername: 'smtp.gmail.com' }
+    };
+  }
+  return {
+    ...common,
     host: 'smtp.gmail.com',
     port: 587,
     secure: false,
     family: 4,
     lookup: lookupIpv4Only,
-    getSocket: getGmailIpv4Socket,
-    tls: {
-      servername: 'smtp.gmail.com'
-    },
+    requireTLS: process.env.SMTP_REQUIRE_TLS !== 'false',
+    tls: { servername: 'smtp.gmail.com' }
+  };
+};
+const getGmailTransporterForUser = async ({ userId, email, appPassword }) => {
+  const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
+  const mode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587';
+  const config = await buildGmailTransportConfig({ email, appPassword, mode });
+  const cacheKey = `smtp-${mode}:${config.host}:${config.port}:${userId}:${email}:${passwordHash}`;
+  const cached = gmailTransporterCache.get(cacheKey);
+  if (cached) return cached;
+
+  const userTransporter = nodemailer.createTransport({
+    ...config,
     pool: true,
     maxConnections: 1,
-    maxMessages: 20,
-    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15_000),
-    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10_000),
-    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30_000),
-    auth: {
-      user: email,
-      pass: appPassword
-    }
+    maxMessages: 20
   });
+  userTransporter.__debugConfig = {
+    mode,
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    requireTLS: config.requireTLS,
+    hasLookup: Boolean(config.lookup),
+    hasGetSocket: Boolean(config.getSocket)
+  };
 
   gmailTransporterCache.set(cacheKey, userTransporter);
   if (gmailTransporterCache.size > 50) {
@@ -1043,12 +1123,138 @@ router.get('/daily-limit', auth, async (req, res) => {
   }
 });
 
+// @route   GET /api/email-leads/smtp-diagnostics
+// @desc    Diagnose Gmail SMTP connectivity from the deployed backend without sending email
+// @access  Private (Admin, Manager, BD Executive)
+router.get('/smtp-diagnostics', auth, async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Access denied.' });
+    }
+    const sendingUser = await User.findById(req.user.id).select('appPassword email name').lean();
+    if (!sendingUser) return res.status(404).json({ message: 'User not found.' });
+    const envStatus = {
+      NODE_ENV: process.env.NODE_ENV || null,
+      SMTP_TRANSPORT_MODE: process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587',
+      SMTP_CONNECTION_TIMEOUT_MS: process.env.SMTP_CONNECTION_TIMEOUT_MS || null,
+      SMTP_GREETING_TIMEOUT_MS: process.env.SMTP_GREETING_TIMEOUT_MS || null,
+      SMTP_SOCKET_TIMEOUT_MS: process.env.SMTP_SOCKET_TIMEOUT_MS || null,
+      SMTP_REQUIRE_TLS: process.env.SMTP_REQUIRE_TLS || null,
+      hasSenderEmail: Boolean(sendingUser.email),
+      hasAppPassword: Boolean(sendingUser.appPassword)
+    };
+    console.info('[SMTP DIAG] started', { userId: String(req.user.id), senderEmail: sendingUser.email, envStatus });
+    const dnsResult = {};
+    try {
+      dnsResult.lookupDefault = await new Promise((resolve, reject) => dns.lookup('smtp.gmail.com', { all: true }, (error, addresses) => error ? reject(error) : resolve(addresses)));
+    } catch (error) {
+      dnsResult.lookupDefaultError = { code: error.code, message: error.message };
+    }
+    try {
+      dnsResult.resolve4 = await new Promise((resolve, reject) => dns.resolve4('smtp.gmail.com', (error, addresses) => error ? reject(error) : resolve(addresses)));
+    } catch (error) {
+      dnsResult.resolve4Error = { code: error.code, message: error.message };
+    }
+    try {
+      dnsResult.resolve6 = await new Promise((resolve, reject) => dns.resolve6('smtp.gmail.com', (error, addresses) => error ? reject(error) : resolve(addresses)));
+    } catch (error) {
+      dnsResult.resolve6Error = { code: error.code, message: error.message };
+    }
+
+    const ipv4 = Array.isArray(dnsResult.resolve4) ? dnsResult.resolve4[0] : null;
+    const tcpTests = [];
+    tcpTests.push(await tcpConnectTest({ host: 'smtp.gmail.com', port: 587, family: 0 }));
+    tcpTests.push(await tcpConnectTest({ host: 'smtp.gmail.com', port: 587, family: 4 }));
+    if (ipv4) tcpTests.push(await tcpConnectTest({ host: ipv4, port: 587, family: 4 }));
+    if (ipv4) tcpTests.push(await tcpConnectTest({ host: ipv4, port: 465, family: 4 }));
+
+    const modes = String(req.query.modes || 'default-587,ipv4-lookup-587,direct-ipv4-587,ssl-465')
+      .split(',')
+      .map(mode => mode.trim())
+      .filter(Boolean);
+    const transportTests = [];
+    if (sendingUser.email && sendingUser.appPassword) {
+      for (const mode of modes) {
+        const modeStartedAt = Date.now();
+        try {
+          const config = await buildGmailTransportConfig({ email: sendingUser.email, appPassword: sendingUser.appPassword, mode });
+          const testTransporter = nodemailer.createTransport(config);
+          await testTransporter.verify();
+          testTransporter.close?.();
+          transportTests.push({
+            mode,
+            ok: true,
+            durationMs: Date.now() - modeStartedAt,
+            config: {
+              host: config.host,
+              port: config.port,
+              secure: config.secure,
+              requireTLS: config.requireTLS,
+              hasLookup: Boolean(config.lookup),
+              hasGetSocket: Boolean(config.getSocket)
+            }
+          });
+        } catch (error) {
+          transportTests.push({
+            mode,
+            ok: false,
+            durationMs: Date.now() - modeStartedAt,
+            error: {
+              code: error.code,
+              errno: error.errno,
+              syscall: error.syscall,
+              address: error.address,
+              port: error.port,
+              command: error.command,
+              responseCode: error.responseCode,
+              message: error.message,
+              stack: error.stack
+            }
+          });
+        }
+      }
+    }
+    console.info('[SMTP DIAG] completed', { userId: String(req.user.id), durationMs: Date.now() - startedAt, tcpTests, transportTests });
+    return res.json({
+      success: true,
+      durationMs: Date.now() - startedAt,
+      senderEmail: sendingUser.email,
+      envStatus,
+      dns: dnsResult,
+      tcpTests,
+      transportTests
+    });
+  } catch (error) {
+    console.error('[SMTP DIAG] failed', { userId: req.user?.id, message: error.message, stack: error.stack });
+    return res.status(500).json({ success: false, message: error.message, stack: error.stack });
+  }
+});
+
 // @route   POST /api/email-leads/send-mails
 // @desc    Send an email as the logged-in user, using their own stored app password
 // @access  Private (Admin, Manager, BD Executive)
 router.post('/send-mails', auth, async (req, res) => {
     let reservationId = null;
+    const requestStartedAt = Date.now();
+    const traceId = crypto.randomUUID();
+    const stepTimings = [];
+    const markStep = (step, startedAt, extra = {}) => {
+      const entry = { step, durationMs: Date.now() - startedAt, ...extra };
+      stepTimings.push(entry);
+      console.info('[SEND EMAIL STEP]', { traceId, userId: req.user?.id, ...entry });
+    };
     try {
+    console.info('[SEND EMAIL] API request received', {
+      traceId,
+      userId: req.user?.id,
+      role: req.user?.role,
+      hasBody: Boolean(req.body),
+      leadId: req.body?.leadId || null,
+      pocId: req.body?.pocId || null,
+      recipientEmail: req.body?.to || null
+    });
+    let stepStartedAt = Date.now();
     if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Access denied.' });
     }
@@ -1064,13 +1270,19 @@ router.post('/send-mails', auth, async (req, res) => {
     if (!htmlBody || !htmlBody.trim()) {
       return res.status(400).json({ message: 'Email body is required.' });
     }
+    markStep('validate_request', stepStartedAt);
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(to.trim())) {
       return res.status(400).json({ message: 'Recipient email is not a valid email address.' });
     }
      
+    stepStartedAt = Date.now();
     const sendingUser = await User.findById(req.user.id).select('appPassword email name');
+    markStep('find_sending_user', stepStartedAt, {
+      senderEmail: sendingUser?.email || null,
+      hasAppPassword: Boolean(sendingUser?.appPassword)
+    });
     if (!sendingUser) {
       return res.status(404).json({ message: 'User not found.' });
     }
@@ -1090,7 +1302,9 @@ router.post('/send-mails', auth, async (req, res) => {
     let lead = null;
     let selectedPoc = null;
     if (leadId) {
+      stepStartedAt = Date.now();
       ({ lead } = await findLeadAcrossCollections(leadId));
+      markStep('find_lead', stepStartedAt, { leadFound: Boolean(lead) });
       if (!lead) {
         return res.status(404).json({ message: 'Lead not found.' });
       }
@@ -1098,7 +1312,9 @@ router.post('/send-mails', auth, async (req, res) => {
       if (req.user.role !== 'Admin') {
         let userIds = [req.user.id];
         if (req.user.role === 'Manager') {
+          stepStartedAt = Date.now();
           const reporters = await User.find({ reporter: req.user.id }).select('_id');
+          markStep('find_manager_reporters', stepStartedAt, { reporterCount: reporters.length });
           userIds = userIds.concat(reporters.map(r => r._id.toString()));
         }
         const isOwner = userIds.includes(lead.assignedBy?.toString()) ||
@@ -1144,7 +1360,9 @@ router.post('/send-mails', auth, async (req, res) => {
     };
     const finalHtmlBody = applyPocOverridesToBody(htmlBody);
     const finalPlainText = plainText ? applyPocOverridesToBody(plainText) : undefined;
+    markStep('prepare_email_body', requestStartedAt, { cumulative: true });
 
+    stepStartedAt = Date.now();
     const limitResult = await reserveDailyEmailSlot({
       userId: req.user.id,
       leadId: lead?._id,
@@ -1152,6 +1370,7 @@ router.post('/send-mails', auth, async (req, res) => {
       recipientEmail: to.trim(),
       subject: subject.trim()
     });
+    markStep('reserve_daily_email_slot', stepStartedAt, { allowed: limitResult.allowed });
     if (!limitResult.allowed) {
       logDailyLimitDecision({
         userId: req.user.id,
@@ -1168,11 +1387,13 @@ router.post('/send-mails', auth, async (req, res) => {
     }
     reservationId = limitResult.reservation._id;
 
-    const mailTransporter = getGmailTransporterForUser({
+    stepStartedAt = Date.now();
+    const mailTransporter = await getGmailTransporterForUser({
       userId: req.user.id,
       email: sendingUser.email,
       appPassword: sendingUser.appPassword
     });
+    markStep('create_or_get_transporter', stepStartedAt, mailTransporter.__debugConfig || {});
 
     try {
       const smtpStartedAt = Date.now();
@@ -1190,6 +1411,7 @@ router.post('/send-mails', auth, async (req, res) => {
         html: finalHtmlBody,
         ...(finalPlainText ? { text: finalPlainText } : {})
       });
+      markStep('smtp_send_mail', smtpStartedAt);
       console.info('Gmail SMTP send completed', {
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
@@ -1238,8 +1460,10 @@ router.post('/send-mails', auth, async (req, res) => {
       });
     }
 
+    stepStartedAt = Date.now();
     try {
       await completeDailyEmailReservation(reservationId);
+      markStep('complete_daily_email_reservation', stepStartedAt);
     } catch (firstLogError) {
       console.error('Email send log completion failed; retrying', {
         userId: req.user.id,
@@ -1263,7 +1487,9 @@ router.post('/send-mails', auth, async (req, res) => {
       canSend: limitResult.status.emailsRemaining > 0
     };
     try {
+      stepStartedAt = Date.now();
       updatedLimitStatus = await getDailyLimitStatus(req.user.id);
+      markStep('refresh_daily_limit_status', stepStartedAt);
     } catch (statusError) {
       console.error('Post-send daily limit refresh failed', {
         userId: req.user.id,
@@ -1286,6 +1512,12 @@ router.post('/send-mails', auth, async (req, res) => {
       console.error('logActivity error (non-blocking):', logErr.message);
     });
 
+    console.info('[SEND EMAIL] response returned', {
+      traceId,
+      userId: String(req.user.id),
+      totalDurationMs: Date.now() - requestStartedAt,
+      stepTimings
+    });
     return res.status(200).json({
       success: true,
       message: 'Email sent successfully.',
@@ -1305,15 +1537,39 @@ router.post('/send-mails', auth, async (req, res) => {
       message: releaseError.message
     });
   });
-  console.error('Send email error:', mailErr);
+  console.error('[SEND EMAIL] failed', {
+    traceId,
+    userId: req.user?.id,
+    totalDurationMs: Date.now() - requestStartedAt,
+    stepTimings,
+    error: {
+      code: mailErr.code,
+      errno: mailErr.errno,
+      syscall: mailErr.syscall,
+      address: mailErr.address,
+      port: mailErr.port,
+      command: mailErr.command,
+      responseCode: mailErr.responseCode,
+      message: mailErr.message,
+      stack: mailErr.stack
+    }
+  });
 
   if (mailErr.responseCode === 550 && /sending limit/i.test(mailErr.response || '')) {
     return res.status(429).json({
+      success: false,
+      code: 'GMAIL_DAILY_LIMIT_EXCEEDED',
       message: 'Daily Gmail sending limit reached for this account. Try again after 24 hours, or use a different sender account.'
     });
   }
 
-  return res.status(502).json({ message: 'Failed to send email. Check your app password is correct and valid.', error: mailErr.message });
+  return res.status(502).json({
+    success: false,
+    code: 'SMTP_SEND_FAILED',
+    message: 'Failed to send email through Gmail SMTP. Please verify the sender email/app password and try again.',
+    error: mailErr.message,
+    traceId
+  });
 }
 });
 
