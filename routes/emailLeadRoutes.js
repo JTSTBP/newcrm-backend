@@ -586,6 +586,7 @@ const auth = require('../middleware/authMiddleware');
 const logActivity = require('../utils/logActivity');
 const nodemailer = require('nodemailer');
 const dns = require('dns');
+const net = require('net');
 const User = require('../models/User');
 const Lead = require('../models/Lead');
 const AiEmailDraft = require('../models/AiEmailDraft');
@@ -965,9 +966,24 @@ const gmailTransporterCache = new Map();
 const lookupIpv4Only = (hostname, options, callback) => {
   dns.lookup(hostname, { ...options, family: 4 }, callback);
 };
+const getGmailIpv4Socket = (options, callback) => {
+  dns.resolve4('smtp.gmail.com', (dnsError, addresses) => {
+    if (dnsError) return callback(dnsError);
+    const address = addresses && addresses[0];
+    if (!address) return callback(new Error('No IPv4 address found for smtp.gmail.com'));
+    const socket = net.connect({
+      host: address,
+      port: options.port || 587,
+      family: 4,
+      timeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15_000)
+    });
+    socket.once('connect', () => callback(null, { connection: socket }));
+    socket.once('error', callback);
+  });
+};
 const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
   const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
-  const cacheKey = `ipv4-v2:${userId}:${email}:${passwordHash}`;
+  const cacheKey = `ipv4-socket-v3:${userId}:${email}:${passwordHash}`;
   const cached = gmailTransporterCache.get(cacheKey);
   if (cached) return cached;
 
@@ -977,6 +993,10 @@ const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
     secure: false,
     family: 4,
     lookup: lookupIpv4Only,
+    getSocket: getGmailIpv4Socket,
+    tls: {
+      servername: 'smtp.gmail.com'
+    },
     pool: true,
     maxConnections: 1,
     maxMessages: 20,
