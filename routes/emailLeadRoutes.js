@@ -992,14 +992,24 @@ const getGmailIpv4Socket = (options, callback) => {
     if (dnsError) return callback(dnsError);
     const address = addresses && addresses[0];
     if (!address) return callback(new Error('No IPv4 address found for smtp.gmail.com'));
+    let completed = false;
+    const finish = (error, result) => {
+      if (completed) return;
+      completed = true;
+      callback(error, result);
+    };
     const socket = net.connect({
       host: address,
       port: options.port || 587,
       family: 4,
-      timeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15_000)
+      timeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 8_000)
     });
-    socket.once('connect', () => callback(null, { connection: socket }));
-    socket.once('error', callback);
+    socket.once('connect', () => finish(null, { connection: socket }));
+    socket.once('timeout', () => {
+      socket.destroy();
+      finish(new Error(`SMTP socket timed out after ${Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 8_000)}ms`));
+    });
+    socket.once('error', error => finish(error));
   });
 };
 const buildGmailTransportConfig = async ({ email, appPassword, mode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587' }) => {
@@ -1204,6 +1214,90 @@ const sendMailWithSmtpFallbacks = async ({ userId, sendingUser, mailOptions, tra
   throw finalError;
 };
 
+const getEmailProvider = () => String(process.env.EMAIL_PROVIDER || process.env.MAIL_PROVIDER || 'smtp').trim().toLowerCase();
+
+const normalizeEmailList = value => {
+  if (!value) return undefined;
+  if (Array.isArray(value)) return value.filter(Boolean).map(item => String(item).trim()).filter(Boolean);
+  return String(value).split(',').map(item => item.trim()).filter(Boolean);
+};
+
+const getResendFromAddress = ({ fromName, fallbackEmail }) => {
+  const configured = String(process.env.RESEND_FROM_EMAIL || process.env.MAIL_FROM || process.env.SMTP_FROM || '').trim();
+  if (configured) return configured;
+  const domain = String(process.env.RESEND_FROM_DOMAIN || '').trim();
+  if (domain) return fromName ? `"${fromName}" <noreply@${domain}>` : `noreply@${domain}`;
+  return fromName ? `"${fromName}" <${fallbackEmail}>` : fallbackEmail;
+};
+
+const sendMailWithResend = async ({ sendingUser, mailOptions, traceId }) => {
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  if (!apiKey) {
+    const error = new Error('Resend API key is not configured. Set RESEND_API_KEY.');
+    error.code = 'EMAIL_PROVIDER_NOT_CONFIGURED';
+    error.traceId = traceId;
+    throw error;
+  }
+  if (typeof fetch !== 'function') {
+    const error = new Error('Global fetch is unavailable in this Node runtime. Use Node 18+ or add a fetch polyfill.');
+    error.code = 'EMAIL_PROVIDER_NOT_CONFIGURED';
+    error.traceId = traceId;
+    throw error;
+  }
+
+  const payload = {
+    from: getResendFromAddress({
+      fromName: sendingUser.name || 'Jobs Territory',
+      fallbackEmail: sendingUser.email
+    }),
+    to: normalizeEmailList(mailOptions.to),
+    cc: normalizeEmailList(mailOptions.cc),
+    bcc: normalizeEmailList(mailOptions.bcc),
+    reply_to: mailOptions.replyTo || sendingUser.email,
+    subject: mailOptions.subject,
+    html: mailOptions.html,
+    text: mailOptions.text
+  };
+  Object.keys(payload).forEach(key => {
+    if (payload[key] === undefined || payload[key] === '' || (Array.isArray(payload[key]) && payload[key].length === 0)) {
+      delete payload[key];
+    }
+  });
+
+  const startedAt = Date.now();
+  console.info('[EMAIL PROVIDER] Sending via Resend HTTPS API', {
+    traceId,
+    from: payload.from,
+    replyTo: payload.reply_to,
+    toCount: payload.to?.length || 0,
+    ccCount: payload.cc?.length || 0
+  });
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data?.message || data?.error || `Resend API failed with status ${response.status}`);
+    error.code = response.status === 401 || response.status === 403 ? 'EMAIL_PROVIDER_AUTH_FAILED' : 'EMAIL_PROVIDER_SEND_FAILED';
+    error.traceId = traceId;
+    error.providerResponse = data;
+    throw error;
+  }
+
+  console.info('[EMAIL PROVIDER] Resend send completed', {
+    traceId,
+    durationMs: Date.now() - startedAt,
+    messageId: data?.id || null
+  });
+  return { provider: 'resend', messageId: data?.id || null };
+};
+
 // @route   POST /api/email-leads/send-email
 // @desc    Send an email (Email Sending tab compose modal)
 // @access  Private (Admin, Manager, BD Executive)
@@ -1271,8 +1365,20 @@ router.get('/smtp-diagnostics', auth, async (req, res) => {
     const tcpTests = [];
     tcpTests.push(await tcpConnectTest({ host: 'smtp.gmail.com', port: 587, family: 0 }));
     tcpTests.push(await tcpConnectTest({ host: 'smtp.gmail.com', port: 587, family: 4 }));
+    tcpTests.push(await tcpConnectTest({ host: 'smtp.gmail.com', port: 465, family: 4 }));
     if (ipv4) tcpTests.push(await tcpConnectTest({ host: ipv4, port: 587, family: 4 }));
     if (ipv4) tcpTests.push(await tcpConnectTest({ host: ipv4, port: 465, family: 4 }));
+
+    const controlTcpTests = [];
+    controlTcpTests.push(await tcpConnectTest({ host: 'www.google.com', port: 443, family: 4 }));
+    controlTcpTests.push(await tcpConnectTest({ host: 'gmail.googleapis.com', port: 443, family: 4 }));
+    const smtpTcpReachable = tcpTests.some(test => test.ok);
+    const httpsTcpReachable = controlTcpTests.some(test => test.ok);
+    const networkConclusion = smtpTcpReachable
+      ? 'At least one Gmail SMTP TCP connection succeeded.'
+      : httpsTcpReachable
+        ? 'HTTPS outbound connectivity works, but Gmail SMTP ports 587/465 are unreachable from this deployment.'
+        : 'Both Gmail SMTP and HTTPS control connections failed from this deployment.';
 
     const modes = String(req.query.modes || 'default-587,ipv4-lookup-587,direct-ipv4-587,ssl-465')
       .split(',')
@@ -1320,7 +1426,7 @@ router.get('/smtp-diagnostics', auth, async (req, res) => {
         }
       }
     }
-    console.info('[SMTP DIAG] completed', { userId: String(req.user.id), durationMs: Date.now() - startedAt, tcpTests, transportTests });
+    console.info('[SMTP DIAG] completed', { userId: String(req.user.id), durationMs: Date.now() - startedAt, tcpTests, controlTcpTests, networkConclusion, transportTests });
     return res.json({
       success: true,
       durationMs: Date.now() - startedAt,
@@ -1328,6 +1434,8 @@ router.get('/smtp-diagnostics', auth, async (req, res) => {
       envStatus,
       dns: dnsResult,
       tcpTests,
+      controlTcpTests,
+      networkConclusion,
       transportTests
     });
   } catch (error) {
@@ -1494,18 +1602,20 @@ router.post('/send-mails', auth, async (req, res) => {
 
     stepStartedAt = Date.now();
     const smtpAttemptModes = getSmtpAttemptModes();
-    markStep('create_or_get_transporter', stepStartedAt, { modes: smtpAttemptModes });
+    const emailProvider = getEmailProvider();
+    markStep('create_or_get_transporter', stepStartedAt, { provider: emailProvider, modes: emailProvider === 'smtp' ? smtpAttemptModes : undefined });
 
     try {
-      const smtpStartedAt = Date.now();
-      console.info('Sending email via Gmail SMTP', {
+      const providerStartedAt = Date.now();
+      console.info('Sending email', {
         traceId,
+        provider: emailProvider,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
         leadId: lead?._id ? String(lead._id) : null,
         pocId: pocId || null,
-        modes: smtpAttemptModes
+        modes: emailProvider === 'smtp' ? smtpAttemptModes : undefined
       });
       const mailOptions = {
         from: sendingUser.name ? `"${sendingUser.name}" <${sendingUser.email}>` : sendingUser.email,
@@ -1514,20 +1624,28 @@ router.post('/send-mails', auth, async (req, res) => {
         html: finalHtmlBody,
         ...(finalPlainText ? { text: finalPlainText } : {})
       };
-      const smtpResult = await sendMailWithSmtpFallbacks({
-        userId: req.user.id,
-        sendingUser,
-        mailOptions,
-        traceId
+      const sendResult = emailProvider === 'resend'
+        ? await sendMailWithResend({ sendingUser, mailOptions, traceId })
+        : await sendMailWithSmtpFallbacks({
+            userId: req.user.id,
+            sendingUser,
+            mailOptions,
+            traceId
+          });
+      markStep('smtp_send_mail', providerStartedAt, {
+        provider: emailProvider,
+        attempts: sendResult.attempts,
+        messageId: sendResult.messageId
       });
-      markStep('smtp_send_mail', smtpStartedAt, { attempts: smtpResult.attempts });
-      console.info('Gmail SMTP send completed', {
+      console.info('Email send completed', {
         traceId,
+        provider: emailProvider,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
-        durationMs: Date.now() - smtpStartedAt,
-        attempts: smtpResult.attempts
+        durationMs: Date.now() - providerStartedAt,
+        attempts: sendResult.attempts,
+        messageId: sendResult.messageId
       });
     } catch (mailErr) {
       await releaseDailyEmailReservation(reservationId).catch(releaseError => {
@@ -1562,11 +1680,13 @@ router.post('/send-mails', auth, async (req, res) => {
       const isConnectionError = isConnectionLevelSmtpError(mailErr);
       console.error('Send email error:', {
         traceId,
+        provider: emailProvider,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
         responseCode: mailErr.responseCode,
         code: mailErr.code,
+        providerResponse: mailErr.providerResponse,
         command: mailErr.command,
         message: mailErr.message,
         smtpAttempts,
@@ -1574,13 +1694,14 @@ router.post('/send-mails', auth, async (req, res) => {
       });
       return res.status(isConnectionError ? 504 : 502).json({
         success: false,
-        code: isConnectionError ? 'SMTP_CONNECTION_FAILED' : 'SMTP_SEND_FAILED',
+        code: mailErr.code || (isConnectionError ? 'SMTP_CONNECTION_FAILED' : 'SMTP_SEND_FAILED'),
         message: isConnectionError
           ? 'The deployed server could not connect to Gmail SMTP before timeout. Please check the SMTP attempts in the response/logs and try a working SMTP_TRANSPORT_MODE.'
-          : 'Failed to send email through Gmail SMTP. Please verify the sender email/app password and try again.',
+          : mailErr.message || 'Failed to send email. Please verify provider configuration and try again.',
         error: mailErr.message,
         traceId,
-        smtpAttempts
+        smtpAttempts,
+        providerResponse: mailErr.providerResponse
       });
     }
 
