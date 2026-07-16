@@ -956,6 +956,39 @@ const getTransporter = () => {
   return transporter;
 };
 
+const gmailTransporterCache = new Map();
+const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
+  const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
+  const cacheKey = `${userId}:${email}:${passwordHash}`;
+  const cached = gmailTransporterCache.get(cacheKey);
+  if (cached) return cached;
+
+  const userTransporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 20,
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15_000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10_000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30_000),
+    auth: {
+      user: email,
+      pass: appPassword
+    }
+  });
+
+  gmailTransporterCache.set(cacheKey, userTransporter);
+  if (gmailTransporterCache.size > 50) {
+    const oldestKey = gmailTransporterCache.keys().next().value;
+    const oldest = gmailTransporterCache.get(oldestKey);
+    oldest?.close?.();
+    gmailTransporterCache.delete(oldestKey);
+  }
+  return userTransporter;
+};
+
 // @route   POST /api/email-leads/send-email
 // @desc    Send an email (Email Sending tab compose modal)
 // @access  Private (Admin, Manager, BD Executive)
@@ -1105,17 +1138,14 @@ router.post('/send-mails', auth, async (req, res) => {
     }
     reservationId = limitResult.reservation._id;
 
-    const mailTransporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,
-      auth: {
-        user: sendingUser.email,
-        pass: sendingUser.appPassword
-      }
+    const mailTransporter = getGmailTransporterForUser({
+      userId: req.user.id,
+      email: sendingUser.email,
+      appPassword: sendingUser.appPassword
     });
 
     try {
+      const smtpStartedAt = Date.now();
       console.info('Sending email via Gmail SMTP', {
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
@@ -1129,6 +1159,12 @@ router.post('/send-mails', auth, async (req, res) => {
         subject: subject.trim(),
         html: finalHtmlBody,
         ...(finalPlainText ? { text: finalPlainText } : {})
+      });
+      console.info('Gmail SMTP send completed', {
+        userId: String(req.user.id),
+        senderEmail: sendingUser.email,
+        recipientEmail: to.trim(),
+        durationMs: Date.now() - smtpStartedAt
       });
     } catch (mailErr) {
       await releaseDailyEmailReservation(reservationId).catch(releaseError => {
@@ -1210,17 +1246,15 @@ router.post('/send-mails', auth, async (req, res) => {
       allowed: true
     });
 
-    try {
-      await logActivity({
+    logActivity({
         leadId: lead ? lead._id : undefined,
         type: 'Email Sent',
         description: `Email "${subject.trim()}" sent to ${to.trim()}${lead ? ` for lead "${lead.company_name || lead.website_url}"` : ''}.`,
         userId: req.user.id,
         userName: req.user.name || 'Admin'
-      });
-    } catch (logErr) {
+      }).catch(logErr => {
       console.error('logActivity error (non-blocking):', logErr.message);
-    }
+    });
 
     return res.status(200).json({
       success: true,
