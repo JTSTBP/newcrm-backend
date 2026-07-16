@@ -585,6 +585,7 @@ const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
 const logActivity = require('../utils/logActivity');
 const nodemailer = require('nodemailer');
+const dns = require('dns');
 const User = require('../models/User');
 const Lead = require('../models/Lead');
 const AiEmailDraft = require('../models/AiEmailDraft');
@@ -603,6 +604,10 @@ const {
   releaseDailyEmailReservation,
   logDailyLimitDecision
 } = require('../services/emailDailyLimitService');
+
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 // Define EmailLead schema (separate collection)
 const EmailLeadSchema = new mongoose.Schema({
@@ -957,9 +962,12 @@ const getTransporter = () => {
 };
 
 const gmailTransporterCache = new Map();
+const lookupIpv4Only = (hostname, options, callback) => {
+  dns.lookup(hostname, { ...options, family: 4 }, callback);
+};
 const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
   const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
-  const cacheKey = `${userId}:${email}:${passwordHash}`;
+  const cacheKey = `ipv4-v2:${userId}:${email}:${passwordHash}`;
   const cached = gmailTransporterCache.get(cacheKey);
   if (cached) return cached;
 
@@ -968,6 +976,7 @@ const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
     port: 587,
     secure: false,
     family: 4,
+    lookup: lookupIpv4Only,
     pool: true,
     maxConnections: 1,
     maxMessages: 20,
