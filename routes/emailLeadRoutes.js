@@ -1298,6 +1298,25 @@ const sendMailWithResend = async ({ sendingUser, mailOptions, traceId }) => {
   return { provider: 'resend', messageId: data?.id || null };
 };
 
+const sendMailWithConfiguredProvider = async ({ emailProvider, userId, sendingUser, mailOptions, traceId }) => {
+  if (emailProvider === 'resend') {
+    return sendMailWithResend({ sendingUser, mailOptions, traceId });
+  }
+  if (emailProvider === 'smtp') {
+    return sendMailWithSmtpFallbacks({
+      userId,
+      sendingUser,
+      mailOptions,
+      traceId
+    });
+  }
+
+  const error = new Error(`Unsupported email provider "${emailProvider}". Use "smtp" or "resend".`);
+  error.code = 'EMAIL_PROVIDER_UNSUPPORTED';
+  error.traceId = traceId;
+  throw error;
+};
+
 // @route   POST /api/email-leads/send-email
 // @desc    Send an email (Email Sending tab compose modal)
 // @access  Private (Admin, Manager, BD Executive)
@@ -1500,7 +1519,10 @@ router.post('/send-mails', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    if (!sendingUser.appPassword || !sendingUser.appPassword.trim()) {
+    const emailProvider = getEmailProvider();
+    const usingSmtpProvider = emailProvider === 'smtp';
+
+    if (usingSmtpProvider && (!sendingUser.appPassword || !sendingUser.appPassword.trim())) {
       return res.status(400).json({
         message: 'No app password found for your account. Please add your email app password before sending emails.'
       });
@@ -1602,7 +1624,6 @@ router.post('/send-mails', auth, async (req, res) => {
 
     stepStartedAt = Date.now();
     const smtpAttemptModes = getSmtpAttemptModes();
-    const emailProvider = getEmailProvider();
     markStep('create_or_get_transporter', stepStartedAt, { provider: emailProvider, modes: emailProvider === 'smtp' ? smtpAttemptModes : undefined });
 
     try {
@@ -1624,15 +1645,14 @@ router.post('/send-mails', auth, async (req, res) => {
         html: finalHtmlBody,
         ...(finalPlainText ? { text: finalPlainText } : {})
       };
-      const sendResult = emailProvider === 'resend'
-        ? await sendMailWithResend({ sendingUser, mailOptions, traceId })
-        : await sendMailWithSmtpFallbacks({
-            userId: req.user.id,
-            sendingUser,
-            mailOptions,
-            traceId
-          });
-      markStep('smtp_send_mail', providerStartedAt, {
+      const sendResult = await sendMailWithConfiguredProvider({
+        emailProvider,
+        userId: req.user.id,
+        sendingUser,
+        mailOptions,
+        traceId
+      });
+      markStep('send_mail', providerStartedAt, {
         provider: emailProvider,
         attempts: sendResult.attempts,
         messageId: sendResult.messageId
@@ -1694,7 +1714,7 @@ router.post('/send-mails', auth, async (req, res) => {
       });
       return res.status(isConnectionError ? 504 : 502).json({
         success: false,
-        code: mailErr.code || (isConnectionError ? 'SMTP_CONNECTION_FAILED' : 'SMTP_SEND_FAILED'),
+        code: mailErr.code || (isConnectionError ? 'SMTP_CONNECTION_FAILED' : 'EMAIL_SEND_FAILED'),
         message: isConnectionError
           ? 'The deployed server could not connect to Gmail SMTP before timeout. Please check the SMTP attempts in the response/logs and try a working SMTP_TRANSPORT_MODE.'
           : mailErr.message || 'Failed to send email. Please verify provider configuration and try again.',
