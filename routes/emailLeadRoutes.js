@@ -967,6 +967,7 @@ const getGmailTransporterForUser = ({ userId, email, appPassword }) => {
     host: 'smtp.gmail.com',
     port: 587,
     secure: false,
+    family: 4,
     pool: true,
     maxConnections: 1,
     maxMessages: 20,
