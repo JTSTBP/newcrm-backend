@@ -1065,9 +1065,43 @@ const buildGmailTransportConfig = async ({ email, appPassword, mode = process.en
     tls: { servername: 'smtp.gmail.com' }
   };
 };
-const getGmailTransporterForUser = async ({ userId, email, appPassword }) => {
+const getSmtpAttemptModes = () => {
+  const configuredMode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587';
+  const fallbackModes = String(
+    process.env.SMTP_FALLBACK_MODES || 'direct-ipv4-587,ipv4-lookup-587,ssl-465,default-587,custom-socket-587'
+  )
+    .split(',')
+    .map(mode => mode.trim())
+    .filter(Boolean);
+
+  return [...new Set([configuredMode, ...fallbackModes])];
+};
+
+const isConnectionLevelSmtpError = error => {
+  const text = [
+    error?.message,
+    error?.code,
+    error?.errno,
+    error?.syscall,
+    error?.command
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  return /timeout|etimedout|enetunreach|econnrefused|ehostunreach|eai_again|enotfound|connection|socket/i.test(text);
+};
+
+const sanitizeSmtpError = error => ({
+  code: error?.code || null,
+  errno: error?.errno || null,
+  syscall: error?.syscall || null,
+  address: error?.address || null,
+  port: error?.port || null,
+  command: error?.command || null,
+  responseCode: error?.responseCode || null,
+  message: error?.message || 'Unknown SMTP error'
+});
+
+const getGmailTransporterForUser = async ({ userId, email, appPassword, mode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587' }) => {
   const passwordHash = crypto.createHash('sha256').update(String(appPassword || '')).digest('hex');
-  const mode = process.env.SMTP_TRANSPORT_MODE || 'direct-ipv4-587';
   const config = await buildGmailTransportConfig({ email, appPassword, mode });
   const cacheKey = `smtp-${mode}:${config.host}:${config.port}:${userId}:${email}:${passwordHash}`;
   const cached = gmailTransporterCache.get(cacheKey);
@@ -1097,6 +1131,77 @@ const getGmailTransporterForUser = async ({ userId, email, appPassword }) => {
     gmailTransporterCache.delete(oldestKey);
   }
   return userTransporter;
+};
+
+const sendMailWithSmtpFallbacks = async ({ userId, sendingUser, mailOptions, traceId }) => {
+  const modes = getSmtpAttemptModes();
+  const attempts = [];
+  let lastError = null;
+
+  for (const mode of modes) {
+    const attemptStartedAt = Date.now();
+    let debugConfig = { mode };
+
+    try {
+      const mailTransporter = await getGmailTransporterForUser({
+        userId,
+        email: sendingUser.email,
+        appPassword: sendingUser.appPassword,
+        mode
+      });
+      debugConfig = mailTransporter.__debugConfig || debugConfig;
+
+      console.info('[SMTP ATTEMPT] started', {
+        traceId,
+        userId: String(userId),
+        senderEmail: sendingUser.email,
+        config: debugConfig
+      });
+
+      const info = await mailTransporter.sendMail(mailOptions);
+      const attempt = {
+        mode,
+        ok: true,
+        durationMs: Date.now() - attemptStartedAt,
+        config: debugConfig,
+        messageId: info?.messageId || null
+      };
+      attempts.push(attempt);
+      console.info('[SMTP ATTEMPT] completed', {
+        traceId,
+        userId: String(userId),
+        senderEmail: sendingUser.email,
+        attempt
+      });
+
+      return { info, attempts, transporter: mailTransporter };
+    } catch (error) {
+      const attempt = {
+        mode,
+        ok: false,
+        durationMs: Date.now() - attemptStartedAt,
+        config: debugConfig,
+        error: sanitizeSmtpError(error)
+      };
+      attempts.push(attempt);
+      lastError = error;
+
+      console.warn('[SMTP ATTEMPT] failed', {
+        traceId,
+        userId: String(userId),
+        senderEmail: sendingUser.email,
+        attempt
+      });
+
+      if (!isConnectionLevelSmtpError(error)) {
+        break;
+      }
+    }
+  }
+
+  const finalError = lastError || new Error('SMTP send failed before any transport attempt was completed.');
+  finalError.smtpAttempts = attempts;
+  throw finalError;
 };
 
 // @route   POST /api/email-leads/send-email
@@ -1388,35 +1493,41 @@ router.post('/send-mails', auth, async (req, res) => {
     reservationId = limitResult.reservation._id;
 
     stepStartedAt = Date.now();
-    const mailTransporter = await getGmailTransporterForUser({
-      userId: req.user.id,
-      email: sendingUser.email,
-      appPassword: sendingUser.appPassword
-    });
-    markStep('create_or_get_transporter', stepStartedAt, mailTransporter.__debugConfig || {});
+    const smtpAttemptModes = getSmtpAttemptModes();
+    markStep('create_or_get_transporter', stepStartedAt, { modes: smtpAttemptModes });
 
     try {
       const smtpStartedAt = Date.now();
       console.info('Sending email via Gmail SMTP', {
+        traceId,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
         leadId: lead?._id ? String(lead._id) : null,
-        pocId: pocId || null
+        pocId: pocId || null,
+        modes: smtpAttemptModes
       });
-      await mailTransporter.sendMail({
+      const mailOptions = {
         from: sendingUser.name ? `"${sendingUser.name}" <${sendingUser.email}>` : sendingUser.email,
         to: to.trim(),
         subject: subject.trim(),
         html: finalHtmlBody,
         ...(finalPlainText ? { text: finalPlainText } : {})
+      };
+      const smtpResult = await sendMailWithSmtpFallbacks({
+        userId: req.user.id,
+        sendingUser,
+        mailOptions,
+        traceId
       });
-      markStep('smtp_send_mail', smtpStartedAt);
+      markStep('smtp_send_mail', smtpStartedAt, { attempts: smtpResult.attempts });
       console.info('Gmail SMTP send completed', {
+        traceId,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
-        durationMs: Date.now() - smtpStartedAt
+        durationMs: Date.now() - smtpStartedAt,
+        attempts: smtpResult.attempts
       });
     } catch (mailErr) {
       await releaseDailyEmailReservation(reservationId).catch(releaseError => {
@@ -1428,35 +1539,48 @@ router.post('/send-mails', auth, async (req, res) => {
       });
       reservationId = null;
       const smtpResponse = String(mailErr.response || mailErr.message || '');
+      const smtpAttempts = mailErr.smtpAttempts || [];
       if (mailErr.responseCode === 550 && /Daily user sending limit exceeded/i.test(smtpResponse)) {
         console.warn('Gmail daily sending limit exceeded', {
+          traceId,
           userId: String(req.user.id),
           senderEmail: sendingUser.email,
           recipientEmail: to.trim(),
           responseCode: mailErr.responseCode,
-          command: mailErr.command
+          command: mailErr.command,
+          smtpAttempts
         });
         return res.status(429).json({
           success: false,
           code: 'GMAIL_DAILY_LIMIT_EXCEEDED',
           message: `Gmail says the sender account ${sendingUser.email} has reached its daily sending limit. This limit is controlled by Google and can include emails sent outside this CRM. Please try again after Gmail resets the quota or use another sender account.`,
-          senderEmail: sendingUser.email
+          senderEmail: sendingUser.email,
+          traceId,
+          smtpAttempts
         });
       }
+      const isConnectionError = isConnectionLevelSmtpError(mailErr);
       console.error('Send email error:', {
+        traceId,
         userId: String(req.user.id),
         senderEmail: sendingUser.email,
         recipientEmail: to.trim(),
         responseCode: mailErr.responseCode,
         code: mailErr.code,
         command: mailErr.command,
-        message: mailErr.message
+        message: mailErr.message,
+        smtpAttempts,
+        stack: mailErr.stack
       });
-      return res.status(502).json({
+      return res.status(isConnectionError ? 504 : 502).json({
         success: false,
-        code: 'SMTP_SEND_FAILED',
-        message: 'Failed to send email through Gmail SMTP. Please verify the sender email/app password and try again.',
-        error: mailErr.message
+        code: isConnectionError ? 'SMTP_CONNECTION_FAILED' : 'SMTP_SEND_FAILED',
+        message: isConnectionError
+          ? 'The deployed server could not connect to Gmail SMTP before timeout. Please check the SMTP attempts in the response/logs and try a working SMTP_TRANSPORT_MODE.'
+          : 'Failed to send email through Gmail SMTP. Please verify the sender email/app password and try again.',
+        error: mailErr.message,
+        traceId,
+        smtpAttempts
       });
     }
 
