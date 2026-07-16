@@ -986,7 +986,6 @@ router.get('/daily-limit', auth, async (req, res) => {
 router.post('/send-mails', auth, async (req, res) => {
     let reservationId = null;
     try {
-       console.log(req.user,"jjjjjj")
     if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Access denied.' });
     }
@@ -1009,7 +1008,6 @@ router.post('/send-mails', auth, async (req, res) => {
     }
      
     const sendingUser = await User.findById(req.user.id).select('appPassword email name');
-    console.log(sendingUser,"sendingUser")
     if (!sendingUser) {
       return res.status(404).json({ message: 'User not found.' });
     }
@@ -1118,6 +1116,13 @@ router.post('/send-mails', auth, async (req, res) => {
     });
 
     try {
+      console.info('Sending email via Gmail SMTP', {
+        userId: String(req.user.id),
+        senderEmail: sendingUser.email,
+        recipientEmail: to.trim(),
+        leadId: lead?._id ? String(lead._id) : null,
+        pocId: pocId || null
+      });
       await mailTransporter.sendMail({
         from: sendingUser.name ? `"${sendingUser.name}" <${sendingUser.email}>` : sendingUser.email,
         to: to.trim(),
@@ -1134,8 +1139,37 @@ router.post('/send-mails', auth, async (req, res) => {
         });
       });
       reservationId = null;
-      console.error('Send email error:', mailErr);
-      return res.status(502).json({ message: 'Failed to send email. Check your app password is correct and valid.', error: mailErr.message });
+      const smtpResponse = String(mailErr.response || mailErr.message || '');
+      if (mailErr.responseCode === 550 && /Daily user sending limit exceeded/i.test(smtpResponse)) {
+        console.warn('Gmail daily sending limit exceeded', {
+          userId: String(req.user.id),
+          senderEmail: sendingUser.email,
+          recipientEmail: to.trim(),
+          responseCode: mailErr.responseCode,
+          command: mailErr.command
+        });
+        return res.status(429).json({
+          success: false,
+          code: 'GMAIL_DAILY_LIMIT_EXCEEDED',
+          message: `Gmail says the sender account ${sendingUser.email} has reached its daily sending limit. This limit is controlled by Google and can include emails sent outside this CRM. Please try again after Gmail resets the quota or use another sender account.`,
+          senderEmail: sendingUser.email
+        });
+      }
+      console.error('Send email error:', {
+        userId: String(req.user.id),
+        senderEmail: sendingUser.email,
+        recipientEmail: to.trim(),
+        responseCode: mailErr.responseCode,
+        code: mailErr.code,
+        command: mailErr.command,
+        message: mailErr.message
+      });
+      return res.status(502).json({
+        success: false,
+        code: 'SMTP_SEND_FAILED',
+        message: 'Failed to send email through Gmail SMTP. Please verify the sender email/app password and try again.',
+        error: mailErr.message
+      });
     }
 
     try {

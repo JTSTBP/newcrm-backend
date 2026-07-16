@@ -58,7 +58,7 @@ const buildAiPersonalizedEmailHtml = ({ content: rawContent, company, pointOfCon
   <tr><td style="padding:24px 34px;background:#102a43;border-bottom:4px solid #14b8a6;">
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation"><tr>
       <td align="left">${resources.logoUrl ? `<img src="${escapeHtml(resources.logoUrl)}" alt="${escapeHtml(resources.brandName)}" width="132" style="display:block;max-width:132px;height:auto;border:0;" />` : `<span style="font-size:22px;font-weight:900;color:#fff;">Jobs <span style="color:#5eead4;">Territory</span></span>`}</td>
-      <td align="right"><span style="display:inline-block;padding:7px 12px;border:1px solid rgba(255,255,255,.22);border-radius:30px;color:#dbeafe;font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;">Personal outreach</span></td>
+      <td align="right"></td>
     </tr></table>
   </td></tr>
 
