@@ -37,6 +37,7 @@ const pushRoutes = require('./routes/pushRoutes');
 const pocBucketRoutes = require('./routes/pocBucket');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
+const emailLeadRoutes = require('./routes/emailLeadRoutes');
 const { startNotificationJob } = require('./notificationJob');
 
 app.use('/api/auth', authRoutes);
@@ -46,6 +47,7 @@ app.use('/api/push', pushRoutes);
 app.use('/api/poc-bucket', pocBucketRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/attendance', attendanceRoutes);
+app.use('/api/email-leads', emailLeadRoutes);
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(express.static(path.join(__dirname, "dist")));
