@@ -30,7 +30,8 @@ const LeadActivitySchema = new mongoose.Schema({
             'Lead Approved',
             'Lead Rejected',
             'POC Approved',
-            'POC Rejected'
+            'POC Rejected',
+            'Email Sent'
         ]
     },
     description: { type: String, required: true },
