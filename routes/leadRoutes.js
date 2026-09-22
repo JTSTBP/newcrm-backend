@@ -8,6 +8,7 @@ const Task = require('../models/Task');
 const logActivity = require('../utils/logActivity');
 const auth = require('../middleware/authMiddleware');
 const mongoose = require('mongoose');
+const nodemailer = require('nodemailer');
 
 // Helper to build lead query based on filters
 const buildLeadQuery = (params) => {
@@ -2165,6 +2166,67 @@ router.delete('/:leadId/remarks/bulk', auth, async (req, res) => {
     }
 });
 
+// @route   POST /api/leads/send-auto-message-email
+// @desc    Send auto recruitment message email after Busy/No Answer call
+// @access  Private
+router.post('/send-auto-message-email', auth, async (req, res) => {
+    try {
+        const { to, subject, message, pocName, companyName, senderName } = req.body;
+
+        if (!to) {
+            return res.status(400).json({ message: 'Recipient email (to) is required.' });
+        }
+        if (!message) {
+            return res.status(400).json({ message: 'Message body is required.' });
+        }
+
+        // Resend integration disabled. Using SMTP only.
+
+        // --- Fallback: SMTP via nodemailer ---
+        const smtpUser = process.env.SMTP_USER;
+        const smtpPass = process.env.SMTP_PASS;
+
+        if (!smtpUser || smtpUser === 'youraddress@gmail.com') {
+            return res.status(503).json({
+                message: 'Email service is not configured. Please set SMTP_USER and SMTP_PASS in your .env file, or configure a Resend API key.'
+            });
+        }
+
+        const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST || 'smtp.gmail.com',
+            port: parseInt(process.env.SMTP_PORT) || 587,
+            secure: process.env.SMTP_SECURE === 'true',
+            auth: {
+                user: smtpUser,
+                pass: smtpPass
+            }
+        });
+
+        await transporter.sendMail({
+            from: `"${senderName || 'Job Territory'}" <${process.env.SMTP_FROM || smtpUser}>`,
+            to,
+            subject: subject || `Recruitment Partnership — Job Territory`,
+            text: message,
+            html: `<pre style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;white-space:pre-wrap;">${message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`
+        });
+
+        try {
+            await logActivity({
+                type: 'Auto Message Email Sent',
+                description: `Auto-message email sent to ${pocName || to} (${companyName || 'unknown company'}) by ${senderName || req.user.name}`,
+                userId: req.user.id,
+                userName: req.user.name
+            });
+        } catch (_) { /* non-critical */ }
+
+        res.json({ message: 'Email sent successfully', provider: 'smtp' });
+    } catch (err) {
+        console.error('Send auto message email error:', err);
+        res.status(500).json({ message: err.message || 'Server error while sending email' });
+    }
+});
+
 module.exports = router;
+
 
 
