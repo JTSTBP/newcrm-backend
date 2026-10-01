@@ -252,6 +252,20 @@ router.put('/profile', auth, upload.single('profile_photo'), async (req, res) =>
 // @route   GET /api/auth/users/list
 // @desc    Get simplified list of users (ID and Name) for dropdowns
 // @access  Private (Admin, Manager, BD Executive)
+
+// @route   GET /api/auth/bd-executives
+// @desc    Get active BD Executives for external apps (ATS, etc.)
+// @access  Public
+router.get('/bd-executives', async (req, res) => {
+    try {
+        const bdExecs = await User.find({ role: 'BD Executive' }, 'name email phone role status').sort({ name: 1 });
+        res.json(bdExecs);
+    } catch (err) {
+        console.error('Fetch BD executives error:', err);
+        res.status(500).json({ message: 'Server Error', error: err.message });
+    }
+});
+
 router.get('/users/list', auth, async (req, res) => {
     try {
         if (!['Admin', 'Manager', 'BD Executive'].includes(req.user.role)) {

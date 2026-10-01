@@ -2169,6 +2169,103 @@ router.delete('/:leadId/remarks/bulk', auth, async (req, res) => {
 // @route   POST /api/leads/send-auto-message-email
 // @desc    Send auto recruitment message email after Busy/No Answer call
 // @access  Private
+const escapeEmailHtml = (value = '') =>
+    String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+const renderAutoMessageEmail = ({ message, pocName, companyName, senderName }) => {
+    const paragraphs = String(message)
+        .split(/\n{2,}/)
+        .map(part => part.trim())
+        .filter(Boolean)
+        .map(part => `<p style="margin:0 0 16px;color:#334155;font-size:15px;line-height:1.75;">${escapeEmailHtml(part).replace(/\n/g, '<br>')}</p>`)
+        .join('');
+
+    const safePocName = escapeEmailHtml(pocName || 'there');
+    const safeCompanyName = escapeEmailHtml(companyName || 'your organization');
+    const safeSenderName = escapeEmailHtml(senderName || 'Job Territory Team');
+
+    return `
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recruitment Partnership Opportunity</title>
+</head>
+<body style="margin:0;padding:0;background:#eef2f7;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef2f7;margin:0;padding:28px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #dbe3ef;box-shadow:0 18px 45px rgba(15,28,46,0.12);">
+          <tr>
+            <td style="background:#0f1c2e;padding:28px 32px;color:#ffffff;">
+              <div style="font-size:12px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#7dd3fc;margin-bottom:10px;">Job Territory</div>
+              <h1 style="margin:0;color:#ffffff;font-size:24px;line-height:1.25;font-weight:800;">Recruitment partnership opportunity</h1>
+              <p style="margin:10px 0 0;color:#cbd5e1;font-size:14px;line-height:1.6;">A success-based hiring support note for ${safeCompanyName}.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 32px 8px;background:#ffffff;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
+                    <div style="font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Contact</div>
+                    <div style="font-size:14px;font-weight:800;color:#0f172a;">${safePocName}</div>
+                  </td>
+                  <td width="12"></td>
+                  <td style="padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
+                    <div style="font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Company</div>
+                    <div style="font-size:14px;font-weight:800;color:#0f172a;">${safeCompanyName}</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 32px 8px;">
+              ${paragraphs}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 32px 28px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#ecfeff;border:1px solid #bae6fd;border-radius:14px;">
+                <tr>
+                  <td style="padding:18px;">
+                    <div style="font-size:13px;font-weight:800;color:#075985;margin-bottom:8px;">Why teams work with us</div>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                      <tr>
+                        <td style="font-size:13px;line-height:1.6;color:#0f4c5c;padding:3px 0;">- Screened profiles matched to your hiring needs</td>
+                      </tr>
+                      <tr>
+                        <td style="font-size:13px;line-height:1.6;color:#0f4c5c;padding:3px 0;">- Success-based commercials after candidate joining</td>
+                      </tr>
+                      <tr>
+                        <td style="font-size:13px;line-height:1.6;color:#0f4c5c;padding:3px 0;">- Complimentary replacement support as per agreement</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 32px;">
+              <p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">Sent by <strong style="color:#0f172a;">${safeSenderName}</strong> from Job Territory.</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+};
+
 router.post('/send-auto-message-email', auth, async (req, res) => {
     try {
         const { to, subject, message, pocName, companyName, senderName } = req.body;
@@ -2207,7 +2304,7 @@ router.post('/send-auto-message-email', auth, async (req, res) => {
             to,
             subject: subject || `Recruitment Partnership — Job Territory`,
             text: message,
-            html: `<pre style="font-family:Arial,sans-serif;font-size:14px;line-height:1.7;white-space:pre-wrap;">${message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`
+            html: renderAutoMessageEmail({ message, pocName, companyName, senderName })
         });
 
         try {
