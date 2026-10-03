@@ -1,3 +1,71 @@
+const fs = require('fs/promises');
+const os = require('os');
+const path = require('path');
+const { execFile } = require('child_process');
+const { randomUUID } = require('crypto');
+
+const chromeCandidates = [
+    process.env.CHROME_PATH,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser'
+].filter(Boolean);
+
+const findChromeExecutable = async () => {
+    for (const candidate of chromeCandidates) {
+        try {
+            await fs.access(candidate);
+            return candidate;
+        } catch (_) {
+            // Try the next common location.
+        }
+    }
+    return null;
+};
+
+const execFileAsync = (file, args) => new Promise((resolve, reject) => {
+    execFile(file, args, { windowsHide: true }, (error, stdout, stderr) => {
+        if (error) {
+            error.stdout = stdout;
+            error.stderr = stderr;
+            reject(error);
+            return;
+        }
+        resolve({ stdout, stderr });
+    });
+});
+
+const renderHtmlToPdf = async (html) => {
+    const chromePath = await findChromeExecutable();
+    if (!chromePath) {
+        throw new Error('Chrome or Edge executable not found for HTML PDF rendering.');
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bd-report-'));
+    const htmlPath = path.join(tempDir, 'report.html');
+    const pdfPath = path.join(tempDir, 'report.pdf');
+
+    try {
+        await fs.writeFile(htmlPath, html, 'utf8');
+        await execFileAsync(chromePath, [
+            '--headless=new',
+            '--disable-gpu',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--print-to-pdf-no-header',
+            `--print-to-pdf=${pdfPath}`,
+            `file:///${htmlPath.replace(/\\/g, '/')}`
+        ]);
+        return await fs.readFile(pdfPath);
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+};
+
 const escapePdfText = (value = '') => String(value)
     .replace(/\\/g, '\\\\')
     .replace(/\(/g, '\\(')
@@ -175,4 +243,4 @@ const renderPdfReport = (report) => {
     return Buffer.from(chunks.join(''), 'utf8');
 };
 
-module.exports = { renderPdfReport };
+module.exports = { renderPdfReport, renderHtmlToPdf };

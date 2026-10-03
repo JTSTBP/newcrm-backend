@@ -1,7 +1,7 @@
 const express = require('express');
 const auth = require('../middleware/authMiddleware');
 const BDDailyReportHistory = require('../models/BDDailyReportHistory');
-const { renderPdfReport } = require('../services/bdDailyReportPdf');
+const { renderPdfReport, renderHtmlToPdf } = require('../services/bdDailyReportPdf');
 const {
     getOrCreateSettings,
     generateReportData,
@@ -128,7 +128,13 @@ router.get('/history/:id/download-pdf', auth, async (req, res) => {
 
     const safeDate = String(history.reportDate || 'report').replace(/[^0-9-]/g, '');
     const safeType = String(history.reportType || 'bd-report').toLowerCase();
-    const pdf = renderPdfReport(history.data);
+    let pdf;
+    try {
+        pdf = await renderHtmlToPdf(renderHtmlReport(history.data));
+    } catch (err) {
+        console.error('[BDDailyReport] HTML PDF render failed, using fallback PDF:', err.message);
+        pdf = renderPdfReport(history.data);
+    }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="bd-executive-${safeType}-${safeDate}.pdf"`);
     res.send(pdf);
