@@ -1,6 +1,7 @@
 const express = require('express');
 const auth = require('../middleware/authMiddleware');
 const BDDailyReportHistory = require('../models/BDDailyReportHistory');
+const { renderPdfReport } = require('../services/bdDailyReportPdf');
 const {
     getOrCreateSettings,
     generateReportData,
@@ -118,6 +119,19 @@ router.get('/history/:id/download', auth, async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="bd-executive-${safeType}-${safeDate}.html"`);
     res.send(renderHtmlReport(history.data));
+});
+
+router.get('/history/:id/download-pdf', auth, async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const history = await BDDailyReportHistory.findById(req.params.id);
+    if (!history) return res.status(404).send('Report not found.');
+
+    const safeDate = String(history.reportDate || 'report').replace(/[^0-9-]/g, '');
+    const safeType = String(history.reportType || 'bd-report').toLowerCase();
+    const pdf = renderPdfReport(history.data);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="bd-executive-${safeType}-${safeDate}.pdf"`);
+    res.send(pdf);
 });
 
 module.exports = router;
