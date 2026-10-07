@@ -15,6 +15,11 @@ const pad = (value) => String(value).padStart(2, '0');
 const escapeHtml = (value = '') => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const normalizeStage = (stage) => STAGE_ALIASES[stage] || stage || 'Unknown';
 const objectId = (id) => new mongoose.Types.ObjectId(id);
+const normalizeList = (value) => {
+    if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+    if (!value) return [];
+    return String(value).split(',').map((item) => item.trim()).filter(Boolean);
+};
 
 const getIstParts = (date = new Date()) => {
     const parts = new Intl.DateTimeFormat('en-CA', {
@@ -75,7 +80,14 @@ const increment = (target, key, amount = 1) => {
 
 const getOrCreateSettings = async () => {
     let settings = await BDDailyReportSettings.findOne();
-    if (!settings) settings = await BDDailyReportSettings.create({});
+    if (!settings) {
+        settings = await BDDailyReportSettings.create({
+            ceoRecipients: normalizeList(process.env.BD_DAILY_REPORT_RECIPIENTS),
+            ccRecipients: normalizeList(process.env.BD_DAILY_REPORT_CC_RECIPIENTS),
+            whatsappRecipients: normalizeList(process.env.BD_DAILY_REPORT_WHATSAPP_RECIPIENTS),
+            timezone: process.env.BD_DAILY_REPORT_TIMEZONE || 'Asia/Kolkata'
+        });
+    }
     return settings;
 };
 
@@ -516,7 +528,8 @@ Negotiation: ${report.stageChanges.Negotiation || 0}`;
 };
 
 const sendEmailReport = async (report, settings) => {
-    const recipients = settings.ceoRecipients || [];
+    const recipients = normalizeList((settings.ceoRecipients || []).length ? settings.ceoRecipients : process.env.BD_DAILY_REPORT_RECIPIENTS);
+    const ccRecipients = normalizeList((settings.ccRecipients || []).length ? settings.ccRecipients : process.env.BD_DAILY_REPORT_CC_RECIPIENTS);
     if (!recipients.length) return { status: 'Skipped', error: 'No CEO recipients configured.', recipients };
     const smtpUser = process.env.SMTP_USER;
     const smtpPass = process.env.SMTP_PASS;
@@ -532,7 +545,7 @@ const sendEmailReport = async (report, settings) => {
     await transporter.sendMail({
         from: `"CRM Reports" <${process.env.SMTP_FROM || smtpUser}>`,
         to: recipients.join(','),
-        cc: (settings.ccRecipients || []).join(','),
+        cc: ccRecipients.join(','),
         subject: `${subjectTitle} - ${report.shortDate} - ${suffix}`,
         html: renderHtmlReport(report),
         text: renderWhatsappReport(report)

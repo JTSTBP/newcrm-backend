@@ -2,6 +2,7 @@ const express = require('express');
 const auth = require('../middleware/authMiddleware');
 const BDDailyReportHistory = require('../models/BDDailyReportHistory');
 const { renderPdfReport, renderHtmlToPdf } = require('../services/bdDailyReportPdf');
+const { runDueBDDailyReports } = require('../bdDailyReportJob');
 const {
     getOrCreateSettings,
     generateReportData,
@@ -13,6 +14,26 @@ const {
 } = require('../services/bdDailyReportService');
 
 const router = express.Router();
+
+router.post('/cron/run-due', async (req, res) => {
+    try {
+        const configuredSecret = process.env.BD_DAILY_REPORT_CRON_SECRET;
+        const providedSecret = req.headers['x-cron-secret'] || req.query.secret;
+
+        if (!configuredSecret) {
+            return res.status(404).json({ success: false, message: 'Cron endpoint is not configured.' });
+        }
+
+        if (providedSecret !== configuredSecret) {
+            return res.status(401).json({ success: false, message: 'Invalid cron secret.' });
+        }
+
+        const result = await runDueBDDailyReports('external cron');
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 const requireAdmin = (req, res) => {
     if (req.user.role !== 'Admin') {
